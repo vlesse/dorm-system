@@ -1,0 +1,318 @@
+// ============================================================================
+//  青山园区宿舍管理系统 — 数据模型
+//  设计原则：
+//   1. 最小可分配单位是【床位 Bed】，不是房间。
+//   2. 入住是【带时间区间的记录 Occupancy】，永不覆盖，历史可追溯。
+//   3. 所有业务口径（国籍/部门/职级/休假周期/房型/班次）都在配置表里，可随时改。
+//  数据库：开发期用 SQLite（零依赖，直接跑）。上生产改成 postgresql 只需改
+//  下面 provider 并重新 migrate；schema 已按 Postgres 兼容写法书写。
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ============================== 配置 / 字典 ==============================
+
+/// 国籍。中方、印尼籍为主，偶有韩、德、越等
+model Nationality {
+  id        String  @id // CN / ID / KR / DE / VN ...
+  nameZh    String
+  nameEn    String
+  nameId    String
+  color     String  @default("#1677ff") // 床位图上的标识色
+  sortOrder Int     @default(0)
+  isActive  Boolean @default(true)
+
+  persons   Person[]
+  buildings Building[]
+  floors    Floor[]
+  rooms     Room[]
+}
+
+/// 部门
+model Department {
+  id        Int     @id @default(autoincrement())
+  code      String  @unique
+  nameZh    String
+  nameEn    String
+  nameId    String
+  sortOrder Int     @default(0)
+  isActive  Boolean @default(true)
+
+  persons Person[]
+}
+
+/// 职级。休假周期挂在这里，随时可改
+/// （普通员工 6 个月 / 工程师·科长 5.5 / 部长·经理 4.5 / 总经理 3）
+model PositionLevel {
+  id               Int     @id @default(autoincrement())
+  code             String  @unique
+  nameZh           String
+  nameEn           String
+  nameId           String
+  rank             Int     @default(0) // 越大职级越高
+  leaveCycleMonths Float   @default(6) // 休假周期（月），支持 5.5
+  isLeadership     Boolean @default(false) // 是否中层及以上，决定可住干部房
+  isActive         Boolean @default(true)
+
+  persons Person[]
+}
+
+/// 班次。同房间尽量同班次，避免白班夜班互相吵
+model Shift {
+  id        Int     @id @default(autoincrement())
+  code      String  @unique
+  nameZh    String
+  nameEn    String
+  nameId    String
+  startTime String  @default("08:00")
+  endTime   String  @default("20:00")
+  color     String  @default("#8c8c8c")
+  isActive  Boolean @default(true)
+
+  persons Person[]
+}
+
+/// 雇佣主体：自有员工 / 各承包商（费用结算主体不同）
+model Contractor {
+  id       Int     @id @default(autoincrement())
+  code     String  @unique
+  name     String
+  isSelf   Boolean @default(false) // true = 本公司自有员工
+  contact  String?
+  phone    String?
+  isActive Boolean @default(true)
+
+  persons Person[]
+}
+
+/// 房型。managementMode = STANDARD 常规宿舍 | HOTEL 酒店式管理
+model RoomType {
+  id              Int     @id @default(autoincrement())
+  code            String  @unique
+  nameZh          String
+  nameEn          String
+  nameId          String
+  managementMode  String  @default("STANDARD")
+  defaultCapacity Int     @default(6)
+  minPositionRank Int? // 入住所需最低职级 rank，null = 不限
+  dailyRate       Float   @default(0) // 每人天费用，用于分摊与账单
+  color           String  @default("#d9d9d9")
+  sortOrder       Int     @default(0)
+  isActive        Boolean @default(true)
+
+  rooms Room[]
+}
+
+/// 通用设置项（阈值、开关、分配规则的软硬约束等），value 存 JSON 字符串
+model SettingItem {
+  key         String  @id
+  value       String
+  group       String  @default("general")
+  description String?
+}
+
+// ============================== 空间 ==============================
+
+model Site {
+  id      Int     @id @default(autoincrement())
+  code    String  @unique
+  name    String
+  address String?
+
+  buildings Building[]
+}
+
+/// 楼栋。8 栋，层数不固定
+model Building {
+  id            Int     @id @default(autoincrement())
+  siteId        Int
+  code          String  @unique
+  name          String
+  genderPolicy  String  @default("MIXED") // MALE / FEMALE / MIXED
+  nationalityId String? // 楼默认国籍归属，null = 不限
+  address       String?
+  note          String?
+  sortOrder     Int     @default(0)
+  isActive      Boolean @default(true)
+
+  site        Site         @relation(fields: [siteId], references: [id])
+  nationality Nationality? @relation(fields: [nationalityId], references: [id])
+  floors      Floor[]
+
+  @@index([siteId])
+}
+
+/// 楼层。国籍归属做到楼层级，支持「一二楼印尼籍、三楼中方」这种混住
+model Floor {
+  id            Int     @id @default(autoincrement())
+  buildingId    Int
+  level         Int
+  name          String
+  nationalityId String? // 该层国籍归属，null = 跟随楼栋 / 不限
+  genderPolicy  String? // null = 跟随楼栋
+  note          String?
+
+  building    Building     @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  nationality Nationality? @relation(fields: [nationalityId], references: [id])
+  rooms       Room[]
+
+  @@unique([buildingId, level])
+  @@index([buildingId])
+}
+
+/// 房间。状态：AVAILABLE 可用 / MAINTENANCE 维修 / QUARANTINE 隔离 / LOCKED 封锁 / CLEANING 待清洁
+model Room {
+  id            Int     @id @default(autoincrement())
+  floorId       Int
+  code          String  @unique
+  name          String
+  roomTypeId    Int
+  capacity      Int     @default(6)
+  genderPolicy  String? // null = 跟随楼层 / 楼栋
+  nationalityId String? // null = 跟随楼层 / 楼栋
+  status        String  @default("AVAILABLE")
+  hasAC         Boolean @default(false)
+  hasBathroom   Boolean @default(false)
+  area          Float?
+  note          String?
+
+  floor       Floor        @relation(fields: [floorId], references: [id], onDelete: Cascade)
+  roomType    RoomType     @relation(fields: [roomTypeId], references: [id])
+  nationality Nationality? @relation(fields: [nationalityId], references: [id])
+  beds        Bed[]
+
+  @@index([floorId])
+  @@index([status])
+}
+
+/// 床位 —— 真正的可分配资源
+/// 状态：FREE 空闲 / RESERVED 已分配未入住 / OCCUPIED 在住 / HELD 休假保留 / MAINTENANCE 维修 / LOCKED 封锁
+model Bed {
+  id       Int     @id @default(autoincrement())
+  roomId   Int
+  code     String  @unique // 如 B3-302-3
+  label    String // 房内编号，如「3 号下铺」
+  position String  @default("SINGLE") // LOWER / UPPER / SINGLE
+  status   String  @default("FREE")
+  note     String?
+
+  room        Room             @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  occupancies Occupancy[]
+  events      OccupancyEvent[] @relation("BedEvents")
+
+  @@index([roomId])
+  @@index([status])
+}
+
+// ============================== 人员 ==============================
+
+/// 人员。一期无花名册，用生成的模拟数据；后续以 HR 系统为唯一来源同步
+model Person {
+  id               Int       @id @default(autoincrement())
+  employeeNo       String    @unique
+  name             String
+  nameLocal        String? // 本地 / 护照拼写
+  gender           String // MALE / FEMALE
+  nationalityId    String
+  idType           String    @default("PASSPORT") // PASSPORT / KTP / KITAS / OTHER
+  idNumber         String
+  departmentId     Int
+  positionLevelId  Int
+  positionTitle    String?
+  shiftId          Int?
+  contractorId     Int
+  phone            String?
+  hireDate         DateTime
+  /// ACTIVE 在职 / ON_LEAVE 休假中 / RESIGNED 离职
+  employmentStatus String    @default("ACTIVE")
+  /// 本轮休假起算日（通常是上次返岗日），按职级休假周期推算下次休假
+  cycleStartDate   DateTime?
+  note             String?
+
+  nationality   Nationality      @relation(fields: [nationalityId], references: [id])
+  department    Department       @relation(fields: [departmentId], references: [id])
+  positionLevel PositionLevel    @relation(fields: [positionLevelId], references: [id])
+  shift         Shift?           @relation(fields: [shiftId], references: [id])
+  contractor    Contractor       @relation(fields: [contractorId], references: [id])
+  occupancies   Occupancy[]
+  events        OccupancyEvent[] @relation("PersonEvents")
+
+  @@index([employmentStatus])
+  @@index([departmentId])
+  @@index([nationalityId])
+}
+
+// ============================== 入住 ==============================
+
+/// 入住记录 —— 带时间区间，永不覆盖。一张床的历史 = 这张表的多行。
+/// status: RESERVED 已分配未入住 / ACTIVE 在住 / HELD 休假保留 / ENDED 已退宿
+model Occupancy {
+  id         Int       @id @default(autoincrement())
+  bedId      Int
+  personId   Int
+  checkInAt  DateTime  @default(now())
+  checkOutAt DateTime?
+  status     String    @default("ACTIVE")
+  assignedBy String?
+  closedBy   String?
+  reason     String? // 退宿 / 调宿原因
+  note       String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  bed    Bed    @relation(fields: [bedId], references: [id])
+  person Person @relation(fields: [personId], references: [id])
+
+  @@index([bedId])
+  @@index([personId])
+  @@index([status])
+}
+
+/// 操作流水 / 审计日志
+/// type: ASSIGN 分配 / CHECKIN 入住 / TRANSFER 调宿 / CHECKOUT 退宿 / HOLD 保留 / RESUME 返岗
+model OccupancyEvent {
+  id        Int      @id @default(autoincrement())
+  type      String
+  personId  Int?
+  bedId     Int?
+  fromBedId Int?
+  toBedId   Int?
+  operator  String   @default("system")
+  note      String?
+  createdAt DateTime @default(now())
+
+  person Person? @relation("PersonEvents", fields: [personId], references: [id])
+  bed    Bed?    @relation("BedEvents", fields: [bedId], references: [id])
+
+  @@index([personId])
+  @@index([createdAt])
+}
+
+// ============================== 设备（为后期监控预留） ==============================
+
+/// 设备挂在空间树任意一级上。一期只录门禁 / 电表占位；
+/// 后期摄像头 type=CAMERA，码流由独立视频网关（go2rtc / MediaMTX）处理，主应用不碰码流。
+model Device {
+  id            Int     @id @default(autoincrement())
+  type          String // CAMERA / DOOR / METER
+  name          String
+  scopeType     String // BUILDING / FLOOR / ROOM
+  scopeId       Int
+  vendor        String? // HIKVISION / DAHUA / ...
+  ipAddress     String?
+  channel       String?
+  streamPath    String? // 视频网关里的流名，一期留空
+  credentialRef String? // 凭据引用，不存明文
+  isActive      Boolean @default(true)
+  note          String?
+
+  @@index([scopeType, scopeId])
+  @@index([type])
+}
