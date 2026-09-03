@@ -52,3 +52,15 @@ body {
 .stat-card { background: #fff; border-radius: 8px; padding: 14px 16px; }
 .mini-bar { height: 8px; border-radius: 4px; background: #f0f0f0; overflow: hidden; display: flex; }
 .mini-bar > i { display: block; height: 100%; }
+
+/* 降标撤除的床位：灰色打叉，一眼看出不是可用床 */
+.bed-cell.disabled {
+  background: repeating-linear-gradient(45deg, #f0f0f0, #f0f0f0 3px, #e0e0e0 3px, #e0e0e0 6px);
+  color: #8c8c8c; border-color: #d9d9d9;
+}
+.room-card.is-out { background: #fafafa; border-style: dashed; }
+.row-danger > td { background: #fff2f0 !important; }
+@media print {
+  .ant-layout-sider, .ant-layout-header, .ant-btn, .ant-select { display: none !important; }
+  .ant-layout-content { padding: 0 !important; overflow: visible !important; }
+}

@@ -1,11 +1,18 @@
 // ============================================================================
 //  青山园区宿舍管理系统 — 数据模型
+//
 //  设计原则：
 //   1. 最小可分配单位是【床位 Bed】，不是房间。
 //   2. 入住是【带时间区间的记录 Occupancy】，永不覆盖，历史可追溯。
-//   3. 所有业务口径（国籍/部门/职级/休假周期/房型/班次）都在配置表里，可随时改。
-//  数据库：开发期用 SQLite（零依赖，直接跑）。上生产改成 postgresql 只需改
-//  下面 provider 并重新 migrate；schema 已按 Postgres 兼容写法书写。
+//   3. 所有业务口径（国籍/部门/职级/休假周期/房型/班次/违规/物品）都在配置表里，可随时改。
+//   4. 三个「人数」是三件事，不能混：
+//        RoomType.defaultCapacity  标称规格（"四人间"就是 4）
+//        Room.capacity             核定人数（这间实际按几人住，可以是 3）
+//        Bed 的实际条数            物理床位（撤掉的床 status=DISABLED，仍留痕）
+//   5. 住宿的人不只有员工：还有家属随迁、访客短住、实习生、承包商工人。
+//
+//  数据库：开发期用 SQLite（零依赖）。上生产改 provider 为 postgresql 后重新 migrate；
+//  schema 已按 Postgres 兼容写法书写。
 // ============================================================================
 
 generator client {
@@ -25,7 +32,7 @@ model Nationality {
   nameZh    String
   nameEn    String
   nameId    String
-  color     String  @default("#1677ff") // 床位图上的标识色
+  color     String  @default("#1677ff")
   sortOrder Int     @default(0)
   isActive  Boolean @default(true)
 
@@ -35,7 +42,6 @@ model Nationality {
   rooms     Room[]
 }
 
-/// 部门
 model Department {
   id        Int     @id @default(autoincrement())
   code      String  @unique
@@ -49,7 +55,6 @@ model Department {
 }
 
 /// 职级。休假周期挂在这里，随时可改
-/// （普通员工 6 个月 / 工程师·科长 5.5 / 部长·经理 4.5 / 总经理 3）
 model PositionLevel {
   id               Int     @id @default(autoincrement())
   code             String  @unique
@@ -58,7 +63,9 @@ model PositionLevel {
   nameId           String
   rank             Int     @default(0) // 越大职级越高
   leaveCycleMonths Float   @default(6) // 休假周期（月），支持 5.5
-  isLeadership     Boolean @default(false) // 是否中层及以上，决定可住干部房
+  isLeadership     Boolean @default(false) // 中层及以上，决定可住干部房
+  /// 可申请夫妻房的最低职级门槛，null = 不限（园区常见做法是有门槛）
+  coupleRoomAllowed Boolean @default(false)
   isActive         Boolean @default(true)
 
   persons Person[]
@@ -84,7 +91,7 @@ model Contractor {
   id       Int     @id @default(autoincrement())
   code     String  @unique
   name     String
-  isSelf   Boolean @default(false) // true = 本公司自有员工
+  isSelf   Boolean @default(false)
   contact  String?
   phone    String?
   isActive Boolean @default(true)
@@ -92,17 +99,41 @@ model Contractor {
   persons Person[]
 }
 
-/// 房型。managementMode = STANDARD 常规宿舍 | HOTEL 酒店式管理
+/// 宗教信仰。影响祷告作息、斋月、饮食（清真），排宿时作为软约束
+model Religion {
+  id       Int     @id @default(autoincrement())
+  code     String  @unique
+  nameZh   String
+  nameEn   String
+  nameId   String
+  /// 是否有饮食禁忌（清真等），同房尽量一致
+  hasDietaryRule Boolean @default(false)
+  isActive Boolean @default(true)
+
+  persons Person[]
+}
+
+/// 房型。规格 + 准入门槛 + 管理模式，全部可配
 model RoomType {
   id              Int     @id @default(autoincrement())
   code            String  @unique
   nameZh          String
   nameEn          String
   nameId          String
+  /// STANDARD 常规宿舍 / HOTEL 酒店式（可预订、按天计费）
   managementMode  String  @default("STANDARD")
+  /// 标称规格人数："四人间" = 4。具体房间的核定人数看 Room.capacity
   defaultCapacity Int     @default(6)
   minPositionRank Int? // 入住所需最低职级 rank，null = 不限
-  dailyRate       Float   @default(0) // 每人天费用，用于分摊与账单
+  dailyRate       Float   @default(0) // 每人天费用
+  /// 夫妻房：只能住已登记配偶关系的两人
+  isCoupleRoom    Boolean @default(false)
+  /// 允许男女同房（夫妻房 / 家庭房），会跳过室友性别检查
+  allowMixedGender Boolean @default(false)
+  /// 允许家属（非员工）入住
+  allowDependents Boolean @default(false)
+  /// false = 功能房（洗衣房 / 祷告室 / 宿管室…），占楼层空间但不住人
+  isResidential   Boolean @default(true)
   color           String  @default("#d9d9d9")
   sortOrder       Int     @default(0)
   isActive        Boolean @default(true)
@@ -110,12 +141,105 @@ model RoomType {
   rooms Room[]
 }
 
-/// 通用设置项（阈值、开关、分配规则的软硬约束等），value 存 JSON 字符串
+/// 物品字典：床上用品、钥匙、门禁卡、电器…
+model ItemType {
+  id           Int     @id @default(autoincrement())
+  code         String  @unique
+  nameZh       String
+  nameEn       String
+  nameId       String
+  unit         String  @default("件")
+  /// 是否需要退宿时归还清点
+  isReturnable Boolean @default(true)
+  deposit      Float   @default(0) // 押金
+  price        Float   @default(0) // 遗失/损坏赔偿单价
+  sortOrder    Int     @default(0)
+  isActive     Boolean @default(true)
+
+  issued IssuedItem[]
+}
+
+/// 违规类型。私拉电线、大功率电器、明火这些在印尼园区是真实的火灾来源
+model ViolationType {
+  id            Int     @id @default(autoincrement())
+  code          String  @unique
+  nameZh        String
+  nameEn        String
+  nameId        String
+  /// LOW / MEDIUM / HIGH / CRITICAL
+  severity      String  @default("MEDIUM")
+  defaultPoints Int     @default(1) // 扣分
+  defaultFine   Float   @default(0) // 罚款
+  isActive      Boolean @default(true)
+
+  violations Violation[]
+}
+
+/// 报修类别
+model WorkOrderCategory {
+  id           Int     @id @default(autoincrement())
+  code         String  @unique
+  nameZh       String
+  nameEn       String
+  nameId       String
+  /// 承诺完成时限（小时），用于超时告警
+  slaHours     Int     @default(48)
+  /// 该类故障是否默认导致房间不可住（如漏水、断电）
+  blocksByDefault Boolean @default(false)
+  isActive     Boolean @default(true)
+
+  workOrders WorkOrder[]
+}
+
+/// 通用设置项，value 存 JSON 字符串
 model SettingItem {
   key         String  @id
   value       String
   group       String  @default("general")
   description String?
+}
+
+// ============================== 权限 ==============================
+
+/// 角色。数据范围通过 UserBuilding 限定到楼栋（楼栋宿管只看自己楼）
+model Role {
+  id          Int     @id @default(autoincrement())
+  code        String  @unique
+  nameZh      String
+  nameEn      String
+  nameId      String
+  /// 逗号分隔的权限点，* 表示全部
+  permissions String  @default("")
+  isActive    Boolean @default(true)
+
+  users User[]
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  username  String   @unique
+  name      String
+  roleId    Int
+  phone     String?
+  /// 关联的员工档案（可空，比如总部账号）
+  personId  Int?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  role      Role           @relation(fields: [roleId], references: [id])
+  buildings UserBuilding[]
+}
+
+/// 用户的数据范围：能管哪几栋楼。为空 = 全部
+model UserBuilding {
+  id         Int @id @default(autoincrement())
+  userId     Int
+  buildingId Int
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  building Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, buildingId])
 }
 
 // ============================== 空间 ==============================
@@ -129,7 +253,6 @@ model Site {
   buildings Building[]
 }
 
-/// 楼栋。8 栋，层数不固定
 model Building {
   id            Int     @id @default(autoincrement())
   siteId        Int
@@ -137,26 +260,29 @@ model Building {
   name          String
   genderPolicy  String  @default("MIXED") // MALE / FEMALE / MIXED
   nationalityId String? // 楼默认国籍归属，null = 不限
+  /// 有没有电梯 —— 决定高层能不能安排行动不便的人
+  hasElevator   Boolean @default(false)
   address       String?
   note          String?
   sortOrder     Int     @default(0)
   isActive      Boolean @default(true)
 
-  site        Site         @relation(fields: [siteId], references: [id])
-  nationality Nationality? @relation(fields: [nationalityId], references: [id])
+  site        Site           @relation(fields: [siteId], references: [id])
+  nationality Nationality?   @relation(fields: [nationalityId], references: [id])
   floors      Floor[]
+  users       UserBuilding[]
 
   @@index([siteId])
 }
 
-/// 楼层。国籍归属做到楼层级，支持「一二楼印尼籍、三楼中方」这种混住
+/// 楼层。国籍归属做到楼层级，支持「一二层印尼籍、三层中方」
 model Floor {
   id            Int     @id @default(autoincrement())
   buildingId    Int
   level         Int
   name          String
-  nationalityId String? // 该层国籍归属，null = 跟随楼栋 / 不限
-  genderPolicy  String? // null = 跟随楼栋
+  nationalityId String?
+  genderPolicy  String?
   note          String?
 
   building    Building     @relation(fields: [buildingId], references: [id], onDelete: Cascade)
@@ -167,19 +293,26 @@ model Floor {
   @@index([buildingId])
 }
 
-/// 房间。状态：AVAILABLE 可用 / MAINTENANCE 维修 / QUARANTINE 隔离 / LOCKED 封锁 / CLEANING 待清洁
+/// 房间
+/// status: AVAILABLE 可用 / MAINTENANCE 维修 / QUARANTINE 隔离 / LOCKED 封锁 / CLEANING 待清洁
 model Room {
   id            Int     @id @default(autoincrement())
   floorId       Int
   code          String  @unique
   name          String
   roomTypeId    Int
+  /// 核定人数 —— 这间房实际按几人住。可以小于房型标称（四人间按三人住）
   capacity      Int     @default(6)
+  /// 降标原因：为什么核定人数少于标称规格
+  deratedReason String?
   genderPolicy  String? // null = 跟随楼层 / 楼栋
   nationalityId String? // null = 跟随楼层 / 楼栋
   status        String  @default("AVAILABLE")
   hasAC         Boolean @default(false)
   hasBathroom   Boolean @default(false)
+  hasWaterHeater Boolean @default(false)
+  hasBalcony    Boolean @default(false)
+  orientation   String? // 朝向：南 / 北 / 东 / 西
   area          Float?
   note          String?
 
@@ -187,66 +320,144 @@ model Room {
   roomType    RoomType     @relation(fields: [roomTypeId], references: [id])
   nationality Nationality? @relation(fields: [nationalityId], references: [id])
   beds        Bed[]
+  assets      Asset[]
+  violations  Violation[]
+  visitors    Visitor[]
+  inspections InspectionItem[]
 
   @@index([floorId])
   @@index([status])
 }
 
 /// 床位 —— 真正的可分配资源
-/// 状态：FREE 空闲 / RESERVED 已分配未入住 / OCCUPIED 在住 / HELD 休假保留 / MAINTENANCE 维修 / LOCKED 封锁
+/// status: FREE 空闲 / RESERVED 已分配未入住 / OCCUPIED 在住 / HELD 休假保留
+///         MAINTENANCE 维修 / LOCKED 封锁 / DISABLED 撤除停用（降标时留痕）
 model Bed {
   id       Int     @id @default(autoincrement())
   roomId   Int
-  code     String  @unique // 如 B3-302-3
-  label    String // 房内编号，如「3 号下铺」
-  position String  @default("SINGLE") // LOWER / UPPER / SINGLE
+  code     String  @unique
+  label    String
+  position String  @default("SINGLE") // LOWER 下铺 / UPPER 上铺 / SINGLE 单床
   status   String  @default("FREE")
+  /// 加床（临时应急），不计入核定人数
+  isExtra  Boolean @default(false)
   note     String?
 
   room        Room             @relation(fields: [roomId], references: [id], onDelete: Cascade)
   occupancies Occupancy[]
   events      OccupancyEvent[] @relation("BedEvents")
+  issued      IssuedItem[]
 
   @@index([roomId])
   @@index([status])
 }
 
+/// 房间固定资产：空调、热水器、床架、桌椅…
+model Asset {
+  id           Int       @id @default(autoincrement())
+  roomId       Int
+  category     String // AC / WATER_HEATER / BED_FRAME / DESK / CHAIR / FAN / CURTAIN / OTHER
+  name         String
+  assetNo      String?   @unique
+  status       String    @default("NORMAL") // NORMAL / BROKEN / REPAIRING / SCRAPPED
+  purchaseDate DateTime?
+  note         String?
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@index([roomId])
+}
+
 // ============================== 人员 ==============================
 
-/// 人员。一期无花名册，用生成的模拟数据；后续以 HR 系统为唯一来源同步
+/// 住在宿舍里的人 —— 不只是员工
+/// personType: EMPLOYEE 员工 / DEPENDENT 家属随迁 / VISITOR 长期访客 / INTERN 实习生
 model Person {
   id               Int       @id @default(autoincrement())
   employeeNo       String    @unique
+  personType       String    @default("EMPLOYEE")
   name             String
-  nameLocal        String? // 本地 / 护照拼写
+  nameLocal        String?
   gender           String // MALE / FEMALE
+  birthDate        DateTime?
   nationalityId    String
   idType           String    @default("PASSPORT") // PASSPORT / KTP / KITAS / OTHER
   idNumber         String
-  departmentId     Int
-  positionLevelId  Int
+  /// 证件到期日 —— 护照 / KITAS 到期要提前提醒，园区里这是真会出事的
+  idExpiryDate     DateTime?
+  /// 护照是否由公司统一保管（中方员工普遍如此）
+  passportHeld     Boolean   @default(false)
+  departmentId     Int?
+  positionLevelId  Int?
   positionTitle    String?
   shiftId          Int?
-  contractorId     Int
+  contractorId     Int?
+  religionId       Int?
   phone            String?
-  hireDate         DateTime
-  /// ACTIVE 在职 / ON_LEAVE 休假中 / RESIGNED 离职
+  emergencyContact String?
+  emergencyPhone   String?
+  /// 会的语言，逗号分隔：zh,id,en —— 混住房间至少要有人能沟通
+  languages        String?
+  isSmoker         Boolean   @default(false)
+  /// 不能睡上铺（年龄 / 体重 / 身体原因）
+  needsLowerBunk   Boolean   @default(false)
+  /// 行动不便，需要低楼层或有电梯的楼
+  needsGroundFloor Boolean   @default(false)
+  hireDate         DateTime?
+  /// ACTIVE 在职 / ON_LEAVE 休假中 / BUSINESS_TRIP 出差 / HOSPITALIZED 住院 / RESIGNED 离职
   employmentStatus String    @default("ACTIVE")
-  /// 本轮休假起算日（通常是上次返岗日），按职级休假周期推算下次休假
+  /// 本轮休假起算日（通常是上次返岗日）
   cycleStartDate   DateTime?
+  /// 家属 / 访客挂靠的员工
+  hostPersonId     Int?
+  photoUrl         String?
   note             String?
 
   nationality   Nationality      @relation(fields: [nationalityId], references: [id])
-  department    Department       @relation(fields: [departmentId], references: [id])
-  positionLevel PositionLevel    @relation(fields: [positionLevelId], references: [id])
+  department    Department?      @relation(fields: [departmentId], references: [id])
+  positionLevel PositionLevel?   @relation(fields: [positionLevelId], references: [id])
   shift         Shift?           @relation(fields: [shiftId], references: [id])
-  contractor    Contractor       @relation(fields: [contractorId], references: [id])
+  contractor    Contractor?      @relation(fields: [contractorId], references: [id])
+  religion      Religion?        @relation(fields: [religionId], references: [id])
+  hostPerson    Person?          @relation("Host", fields: [hostPersonId], references: [id])
+  dependents    Person[]         @relation("Host")
+
   occupancies   Occupancy[]
   events        OccupancyEvent[] @relation("PersonEvents")
+  relFrom       Relationship[]   @relation("RelFrom")
+  relTo         Relationship[]   @relation("RelTo")
+  issuedItems   IssuedItem[]
+  deposits      Deposit[]
+  violations    Violation[]
+  visitorsHosted Visitor[]       @relation("VisitorHost")
+  workOrders    WorkOrder[]      @relation("Reporter")
+  requests      Request[]        @relation("RequestPerson")
+  inspectionItems InspectionItem[]
 
   @@index([employmentStatus])
   @@index([departmentId])
   @@index([nationalityId])
+  @@index([personType])
+  @@index([hostPersonId])
+}
+
+/// 亲属关系。夫妻房必须建立在已登记的 SPOUSE 关系上
+/// type: SPOUSE 配偶 / CHILD 子女 / PARENT 父母 / SIBLING 兄弟姐妹 / OTHER
+model Relationship {
+  id              Int     @id @default(autoincrement())
+  personId        Int
+  relatedPersonId Int
+  type            String
+  /// 是否已核验（结婚证 / 户口本），未核验不能住夫妻房
+  verified        Boolean @default(false)
+  verifiedBy      String?
+  note            String?
+
+  person  Person @relation("RelFrom", fields: [personId], references: [id], onDelete: Cascade)
+  related Person @relation("RelTo", fields: [relatedPersonId], references: [id], onDelete: Cascade)
+
+  @@unique([personId, relatedPersonId, type])
+  @@index([relatedPersonId])
 }
 
 // ============================== 入住 ==============================
@@ -262,13 +473,14 @@ model Occupancy {
   status     String    @default("ACTIVE")
   assignedBy String?
   closedBy   String?
-  reason     String? // 退宿 / 调宿原因
+  reason     String?
   note       String?
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 
-  bed    Bed    @relation(fields: [bedId], references: [id])
-  person Person @relation(fields: [personId], references: [id])
+  bed    Bed          @relation(fields: [bedId], references: [id])
+  person Person       @relation(fields: [personId], references: [id])
+  issued IssuedItem[]
 
   @@index([bedId])
   @@index([personId])
@@ -276,10 +488,9 @@ model Occupancy {
 }
 
 /// 操作流水 / 审计日志
-/// type: ASSIGN 分配 / CHECKIN 入住 / TRANSFER 调宿 / CHECKOUT 退宿 / HOLD 保留 / RESUME 返岗
 model OccupancyEvent {
   id        Int      @id @default(autoincrement())
-  type      String
+  type      String // ASSIGN / CHECKIN / TRANSFER / CHECKOUT / HOLD / RESUME / EXTRA_BED
   personId  Int?
   bedId     Int?
   fromBedId Int?
@@ -295,9 +506,236 @@ model OccupancyEvent {
   @@index([createdAt])
 }
 
+/// 申请与审批流：入住 / 调宿 / 退宿 / 夫妻房 / 访客留宿 / 加床
+model Request {
+  id           Int       @id @default(autoincrement())
+  code         String    @unique
+  type         String // CHECKIN / TRANSFER / CHECKOUT / COUPLE_ROOM / VISITOR_OVERNIGHT / EXTRA_BED
+  personId     Int
+  targetRoomId Int?
+  targetBedId  Int?
+  reason       String?
+  /// PENDING 待审批 / APPROVED 已批准 / REJECTED 已驳回 / CANCELLED 已撤销 / DONE 已执行
+  status       String    @default("PENDING")
+  submittedBy  String
+  submittedAt  DateTime  @default(now())
+  approvedBy   String?
+  approvedAt   DateTime?
+  comment      String?
+
+  person Person @relation("RequestPerson", fields: [personId], references: [id])
+
+  @@index([status])
+  @@index([personId])
+}
+
+// ============================== 物品 / 押金 ==============================
+
+/// 物品发放与归还。退宿时按这张表清点，缺什么赔什么
+model IssuedItem {
+  id           Int       @id @default(autoincrement())
+  personId     Int
+  occupancyId  Int?
+  bedId        Int?
+  itemTypeId   Int
+  quantity     Int       @default(1)
+  issuedAt     DateTime  @default(now())
+  issuedBy     String?
+  returnedAt   DateTime?
+  returnedBy   String?
+  /// GOOD 完好 / DAMAGED 损坏 / LOST 遗失
+  condition    String?
+  compensation Float     @default(0) // 赔偿金额
+  note         String?
+
+  person    Person     @relation(fields: [personId], references: [id], onDelete: Cascade)
+  occupancy Occupancy? @relation(fields: [occupancyId], references: [id])
+  bed       Bed?       @relation(fields: [bedId], references: [id])
+  itemType  ItemType   @relation(fields: [itemTypeId], references: [id])
+
+  @@index([personId])
+  @@index([returnedAt])
+}
+
+/// 押金
+model Deposit {
+  id         Int       @id @default(autoincrement())
+  personId   Int
+  amount     Float
+  paidAt     DateTime  @default(now())
+  refundedAt DateTime?
+  deduction  Float     @default(0) // 扣除金额（赔偿 / 罚款）
+  note       String?
+
+  person Person @relation(fields: [personId], references: [id], onDelete: Cascade)
+
+  @@index([personId])
+}
+
+// ============================== 报修工单 ==============================
+
+model WorkOrder {
+  id           Int       @id @default(autoincrement())
+  code         String    @unique
+  categoryId   Int
+  /// LOW / NORMAL / HIGH / URGENT
+  priority     String    @default("NORMAL")
+  title        String
+  description  String?
+  /// 故障位置：ROOM / BED / FLOOR / BUILDING / PUBLIC（公共区域）
+  scopeType    String
+  scopeId      Int
+  reportedById Int?
+  reporterName String?
+  reportedAt   DateTime  @default(now())
+  assignedTo   String?
+  /// NEW 待派工 / ASSIGNED 已派工 / IN_PROGRESS 处理中 / DONE 已完成 / CLOSED 已关闭 / REJECTED 已驳回
+  status       String    @default("NEW")
+  startedAt    DateTime?
+  finishedAt   DateTime?
+  closedAt     DateTime?
+  cost         Float     @default(0)
+  materials    String?
+  /// 是否导致该房间/床位不可住 —— 会联动置为维修状态
+  blocksOccupancy Boolean @default(false)
+  rating       Int? // 完成后评价 1-5
+  note         String?
+
+  category   WorkOrderCategory @relation(fields: [categoryId], references: [id])
+  reportedBy Person?           @relation("Reporter", fields: [reportedById], references: [id])
+
+  @@index([status])
+  @@index([scopeType, scopeId])
+  @@index([reportedAt])
+}
+
+// ============================== 违规 / 安全 ==============================
+
+model Violation {
+  id          Int       @id @default(autoincrement())
+  code        String    @unique
+  personId    Int?
+  roomId      Int?
+  typeId      Int
+  occurredAt  DateTime  @default(now())
+  points      Int       @default(1)
+  fine        Float     @default(0)
+  description String?
+  evidence    String? // 照片路径 / 说明
+  recordedBy  String
+  /// WARNING 警告 / FINE 罚款 / NOTICE 通报 / TERMINATION 解除合同 / NONE
+  action      String    @default("WARNING")
+  /// OPEN 待处理 / HANDLED 已处理 / APPEALED 申诉中 / CLOSED 已关闭
+  status      String    @default("OPEN")
+  handledAt   DateTime?
+  note        String?
+
+  person Person?       @relation(fields: [personId], references: [id])
+  room   Room?         @relation(fields: [roomId], references: [id])
+  type   ViolationType @relation(fields: [typeId], references: [id])
+
+  @@index([personId])
+  @@index([status])
+  @@index([occurredAt])
+}
+
+/// 访客登记。留宿必须审批 —— 治安和消防名单都要对得上
+model Visitor {
+  id            Int       @id @default(autoincrement())
+  code          String    @unique
+  name          String
+  idNumber      String?
+  phone         String?
+  nationalityId String?
+  hostPersonId  Int
+  roomId        Int?
+  purpose       String?
+  checkInAt     DateTime  @default(now())
+  expectedOutAt DateTime?
+  checkOutAt    DateTime?
+  /// 是否留宿过夜
+  overnight     Boolean   @default(false)
+  /// PENDING 待审批 / APPROVED 已批准 / REJECTED 已驳回 / IN 在园 / OUT 已离开
+  status        String    @default("PENDING")
+  approvedBy    String?
+  registeredBy  String
+  note          String?
+
+  hostPerson Person @relation("VisitorHost", fields: [hostPersonId], references: [id])
+  room       Room?  @relation(fields: [roomId], references: [id])
+
+  @@index([status])
+  @@index([hostPersonId])
+}
+
+/// 查寝 / 卫生检查 / 安全检查
+/// type: NIGHT_ROLL_CALL 夜间查寝 / HYGIENE 卫生检查 / SAFETY 安全检查
+model Inspection {
+  id         Int       @id @default(autoincrement())
+  code       String    @unique
+  type       String
+  scopeType  String // BUILDING / FLOOR
+  scopeId    Int
+  plannedAt  DateTime
+  executedAt DateTime?
+  inspector  String?
+  /// PLANNED 计划中 / DOING 进行中 / DONE 已完成
+  status     String    @default("PLANNED")
+  score      Float?
+  summary    String?
+
+  items InspectionItem[]
+
+  @@index([type])
+  @@index([plannedAt])
+}
+
+/// 查寝明细：按房间逐条记录，夜间点名记录到人
+model InspectionItem {
+  id           Int      @id @default(autoincrement())
+  inspectionId Int
+  roomId       Int
+  personId     Int?
+  /// 夜间点名：是否在位
+  present      Boolean?
+  score        Float?
+  issues       String? // 发现的问题
+  photo        String?
+  createdAt    DateTime @default(now())
+
+  inspection Inspection @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
+  room       Room       @relation(fields: [roomId], references: [id])
+  person     Person?    @relation(fields: [personId], references: [id])
+
+  @@index([inspectionId])
+  @@index([roomId])
+}
+
+/// 公告 / 通知（停水停电、检查通知、疏散演练）
+model Announcement {
+  id          Int       @id @default(autoincrement())
+  title       String
+  content     String
+  titleId     String? // Bahasa
+  contentId   String?
+  titleEn     String?
+  contentEn   String?
+  /// INFO / WARNING / URGENT
+  level       String    @default("INFO")
+  /// ALL / BUILDING / FLOOR / ROOM
+  scopeType   String    @default("ALL")
+  scopeId     Int?
+  publishedAt DateTime  @default(now())
+  expiresAt   DateTime?
+  publishedBy String
+  isActive    Boolean   @default(true)
+
+  @@index([publishedAt])
+}
+
 // ============================== 设备（为后期监控预留） ==============================
 
-/// 设备挂在空间树任意一级上。一期只录门禁 / 电表占位；
+/// 设备挂在空间树任意一级上。
 /// 后期摄像头 type=CAMERA，码流由独立视频网关（go2rtc / MediaMTX）处理，主应用不碰码流。
 model Device {
   id            Int     @id @default(autoincrement())
@@ -305,11 +743,11 @@ model Device {
   name          String
   scopeType     String // BUILDING / FLOOR / ROOM
   scopeId       Int
-  vendor        String? // HIKVISION / DAHUA / ...
+  vendor        String?
   ipAddress     String?
   channel       String?
-  streamPath    String? // 视频网关里的流名，一期留空
-  credentialRef String? // 凭据引用，不存明文
+  streamPath    String?
+  credentialRef String?
   isActive      Boolean @default(true)
   note          String?
 

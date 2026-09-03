@@ -4,8 +4,18 @@ import { ROOM_INCLUDE, serializeRoom } from '../services/space.js';
 
 const LIVE = ['ACTIVE', 'HELD', 'RESERVED'];
 
+const countBeds = (beds: { status: string }[]) => ({
+  total: beds.length,
+  occupied: beds.filter((b) => b.status === 'OCCUPIED').length,
+  held: beds.filter((b) => b.status === 'HELD').length,
+  reserved: beds.filter((b) => b.status === 'RESERVED').length,
+  free: beds.filter((b) => b.status === 'FREE').length,
+  maintenance: beds.filter((b) => ['MAINTENANCE', 'LOCKED'].includes(b.status)).length,
+  disabled: beds.filter((b) => b.status === 'DISABLED').length,
+});
+
 export default async function spaceRoutes(app: FastifyInstance) {
-  /** 空间树：园区 → 楼栋 → 楼层（带床位统计） */
+  /** 空间树：园区 → 楼栋 → 楼层（带床位与房间统计） */
   app.get('/api/space/tree', async () => {
     const buildings = await prisma.building.findMany({
       where: { isActive: true },
@@ -16,38 +26,37 @@ export default async function spaceRoutes(app: FastifyInstance) {
           orderBy: { level: 'asc' },
           include: {
             nationality: true,
-            rooms: { include: { beds: { select: { id: true, status: true } } } },
+            rooms: { include: { roomType: true, beds: { select: { id: true, status: true } } } },
           },
         },
       },
     });
 
-    const count = (beds: { status: string }[]) => ({
-      total: beds.length,
-      occupied: beds.filter((b) => b.status === 'OCCUPIED').length,
-      held: beds.filter((b) => b.status === 'HELD').length,
-      reserved: beds.filter((b) => b.status === 'RESERVED').length,
-      free: beds.filter((b) => b.status === 'FREE').length,
-      maintenance: beds.filter((b) => ['MAINTENANCE', 'LOCKED'].includes(b.status)).length,
-    });
-
     return buildings.map((b) => {
-      const allBeds = b.floors.flatMap((f) => f.rooms.flatMap((r) => r.beds));
+      const allRooms = b.floors.flatMap((f) => f.rooms);
+      const allBeds = allRooms.flatMap((r) => r.beds);
       return {
         id: b.id, code: b.code, name: b.name,
         genderPolicy: b.genderPolicy,
         nationalityId: b.nationalityId,
         nationalityColor: b.nationality?.color ?? null,
+        hasElevator: b.hasElevator,
         note: b.note,
         floorCount: b.floors.length,
-        stats: count(allBeds),
+        roomCount: allRooms.length,
+        functionRoomCount: allRooms.filter((r) => !r.roomType.isResidential).length,
+        deratedRoomCount: allRooms.filter((r) => r.deratedReason).length,
+        approvedCapacity: allRooms.reduce((s, r) => s + r.capacity, 0),
+        stats: countBeds(allBeds),
         floors: b.floors.map((f) => ({
           id: f.id, level: f.level, name: f.name,
           nationalityId: f.nationalityId,
           nationalityColor: f.nationality?.color ?? null,
           genderPolicy: f.genderPolicy,
           roomCount: f.rooms.length,
-          stats: count(f.rooms.flatMap((r) => r.beds)),
+          functionRoomCount: f.rooms.filter((r) => !r.roomType.isResidential).length,
+          approvedCapacity: f.rooms.reduce((s, r) => s + r.capacity, 0),
+          stats: countBeds(f.rooms.flatMap((r) => r.beds)),
         })),
       };
     });
@@ -71,6 +80,7 @@ export default async function spaceRoutes(app: FastifyInstance) {
       building: {
         id: floor.building.id, code: floor.building.code, name: floor.building.name,
         genderPolicy: floor.building.genderPolicy, nationalityId: floor.building.nationalityId,
+        hasElevator: floor.building.hasElevator,
       },
       rooms: floor.rooms.map(serializeRoom),
     };
@@ -82,10 +92,20 @@ export default async function spaceRoutes(app: FastifyInstance) {
       include: ROOM_INCLUDE,
     });
     if (!room) return reply.code(404).send({ error: 'room not found' });
-    return serializeRoom(room);
+    const workOrders = await prisma.workOrder.findMany({
+      where: { scopeType: 'ROOM', scopeId: room.id },
+      include: { category: true }, orderBy: { reportedAt: 'desc' }, take: 10,
+    });
+    return {
+      ...serializeRoom(room),
+      workOrders: workOrders.map((w) => ({
+        id: w.id, code: w.code, title: w.title, category: w.category.nameZh,
+        status: w.status, priority: w.priority, reportedAt: w.reportedAt,
+      })),
+    };
   });
 
-  /** 修改楼层归属（国籍 / 性别策略）—— 你说的「不要写死」就靠这个接口 */
+  /** 修改楼层归属（国籍 / 性别策略） */
   app.put<{ Params: { id: string }; Body: { nationalityId?: string | null; genderPolicy?: string | null; note?: string | null } }>(
     '/api/space/floors/:id',
     async (req) => {
@@ -101,45 +121,107 @@ export default async function spaceRoutes(app: FastifyInstance) {
     }
   );
 
-  app.put<{ Params: { id: string }; Body: { genderPolicy?: string; nationalityId?: string | null; name?: string; note?: string | null } }>(
-    '/api/space/buildings/:id',
-    async (req) => {
-      const { genderPolicy, nationalityId, name, note } = req.body;
-      return prisma.building.update({
-        where: { id: Number(req.params.id) },
-        data: {
-          ...(genderPolicy !== undefined ? { genderPolicy } : {}),
-          ...(nationalityId !== undefined ? { nationalityId: nationalityId || null } : {}),
-          ...(name !== undefined ? { name } : {}),
-          ...(note !== undefined ? { note } : {}),
-        },
+  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/space/buildings/:id', async (req) => {
+    const b = req.body;
+    return prisma.building.update({
+      where: { id: Number(req.params.id) },
+      data: {
+        ...(b.genderPolicy !== undefined ? { genderPolicy: b.genderPolicy } : {}),
+        ...(b.nationalityId !== undefined ? { nationalityId: b.nationalityId || null } : {}),
+        ...(b.hasElevator !== undefined ? { hasElevator: b.hasElevator } : {}),
+        ...(b.name !== undefined ? { name: b.name } : {}),
+        ...(b.note !== undefined ? { note: b.note } : {}),
+      },
+    });
+  });
+
+  /** 房间状态与属性维护 */
+  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/space/rooms/:id', async (req, reply) => {
+    const id = Number(req.params.id);
+    const b = req.body;
+    if (b.status && ['MAINTENANCE', 'LOCKED', 'QUARANTINE'].includes(b.status)) {
+      const live = await prisma.occupancy.count({ where: { status: { in: LIVE }, bed: { roomId: id } } });
+      if (live > 0) return reply.code(400).send({ error: `房间内仍有 ${live} 人未退宿，不能置为「${b.status}」` });
+    }
+    const data: any = {};
+    for (const k of ['status', 'note', 'roomTypeId', 'genderPolicy', 'nationalityId',
+      'hasAC', 'hasBathroom', 'hasWaterHeater', 'hasBalcony', 'orientation', 'area', 'name']) {
+      if (k in b) data[k] = b[k];
+    }
+    return prisma.room.update({ where: { id }, data });
+  });
+
+  /**
+   * 调整核定人数（降标 / 恢复）。
+   * 「四人间实际住三人」就走这个接口：核定人数改成 3，多出来的空床自动标记为撤除。
+   * 已经住人的床不会被动，会返回提示让宿管先调宿。
+   */
+  app.put<{ Params: { id: string }; Body: { capacity: number; deratedReason?: string | null; operator?: string } }>(
+    '/api/space/rooms/:id/capacity',
+    async (req, reply) => {
+      const id = Number(req.params.id);
+      const { capacity, deratedReason } = req.body;
+      const room = await prisma.room.findUnique({
+        where: { id },
+        include: { roomType: true, beds: { include: { occupancies: { where: { status: { in: LIVE } } } } } },
       });
+      if (!room) return reply.code(404).send({ error: '房间不存在' });
+      if (!room.roomType.isResidential) return reply.code(400).send({ error: '功能房不设核定人数' });
+      if (capacity < 0 || capacity > room.roomType.defaultCapacity + 4)
+        return reply.code(400).send({ error: `核定人数应在 0 ~ ${room.roomType.defaultCapacity + 4} 之间` });
+
+      const occupied = room.beds.filter((b) => b.occupancies.length > 0);
+      if (occupied.length > capacity)
+        return reply.code(400).send({
+          error: `该房间当前在住 ${occupied.length} 人，超过要设置的核定人数 ${capacity}，请先调宿`,
+        });
+
+      // 空床按顺序：前 capacity 个保留可用，其余标记撤除
+      const ordered = [...room.beds].sort((a, b) => {
+        const ao = a.occupancies.length > 0 ? 0 : 1;
+        const bo = b.occupancies.length > 0 ? 0 : 1;
+        return ao - bo || a.id - b.id;
+      });
+      await prisma.$transaction(async (tx) => {
+        await tx.room.update({
+          where: { id },
+          data: {
+            capacity,
+            deratedReason: capacity < room.roomType.defaultCapacity ? (deratedReason ?? '按核定人数降标') : null,
+          },
+        });
+        for (const [i, bed] of ordered.entries()) {
+          if (bed.occupancies.length > 0) continue;
+          const shouldDisable = i >= capacity;
+          const target = shouldDisable ? 'DISABLED' : 'FREE';
+          if (['MAINTENANCE', 'LOCKED'].includes(bed.status)) continue; // 报修中的床不动
+          if (bed.status !== target) {
+            await tx.bed.update({
+              where: { id: bed.id },
+              data: { status: target, note: shouldDisable ? '按核定人数降标撤除' : null },
+            });
+          }
+        }
+      });
+      const updated = await prisma.room.findUnique({ where: { id }, include: ROOM_INCLUDE });
+      return serializeRoom(updated);
     }
   );
 
-  /** 房间状态切换：维修 / 隔离 / 封锁 / 可用 */
-  app.put<{ Params: { id: string }; Body: { status?: string; note?: string | null; roomTypeId?: number; capacity?: number } }>(
-    '/api/space/rooms/:id',
-    async (req, reply) => {
-      const id = Number(req.params.id);
-      const { status, note, roomTypeId, capacity } = req.body;
-      if (status && status !== 'AVAILABLE') {
-        const live = await prisma.occupancy.count({
-          where: { status: { in: LIVE }, bed: { roomId: id } },
-        });
-        if (live > 0 && ['MAINTENANCE', 'LOCKED'].includes(status)) {
-          return reply.code(400).send({ error: `房间内仍有 ${live} 人未退宿，不能置为「${status}」` });
-        }
-      }
-      return prisma.room.update({
-        where: { id },
-        data: {
-          ...(status !== undefined ? { status } : {}),
-          ...(note !== undefined ? { note } : {}),
-          ...(roomTypeId !== undefined ? { roomTypeId } : {}),
-          ...(capacity !== undefined ? { capacity } : {}),
-        },
-      });
-    }
-  );
+  /** 楼层平面：一屏看完这层每间房的类型、核定、在住 */
+  app.get<{ Params: { id: string } }>('/api/space/floors/:id/summary', async (req) => {
+    const rooms = await prisma.room.findMany({
+      where: { floorId: Number(req.params.id) },
+      include: { roomType: true, beds: { include: { occupancies: { where: { status: { in: LIVE } } } } } },
+      orderBy: { code: 'asc' },
+    });
+    return rooms.map((r) => ({
+      id: r.id, code: r.code, roomType: r.roomType.nameZh, roomTypeCode: r.roomType.code,
+      isResidential: r.roomType.isResidential, isCoupleRoom: r.roomType.isCoupleRoom,
+      nominal: r.roomType.defaultCapacity, capacity: r.capacity, deratedReason: r.deratedReason,
+      occupants: r.beds.reduce((s, b) => s + b.occupancies.length, 0),
+      usableBeds: r.beds.filter((b) => !['DISABLED', 'MAINTENANCE', 'LOCKED'].includes(b.status)).length,
+      status: r.status,
+    }));
+  });
 }

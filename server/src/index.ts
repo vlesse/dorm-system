@@ -6,6 +6,7 @@ import personRoutes from './routes/persons.js';
 import allocationRoutes from './routes/allocation.js';
 import reportRoutes from './routes/reports.js';
 import configRoutes from './routes/config.js';
+import operationRoutes from './routes/operations.js';
 
 const app = Fastify({ logger: { transport: undefined, level: 'warn' } });
 
@@ -18,6 +19,7 @@ await app.register(spaceRoutes);
 await app.register(personRoutes);
 await app.register(allocationRoutes);
 await app.register(reportRoutes);
+await app.register(operationRoutes);
 
 // 用独立的 API_PORT，避免被外部工具注入的 PORT 抢占前端端口
 const port = Number(process.env.API_PORT ?? 3101);
