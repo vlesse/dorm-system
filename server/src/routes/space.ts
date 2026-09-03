@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../db.js';
 import { ROOM_INCLUDE, serializeRoom } from '../services/space.js';
+import { buildingScope, requirePerm, actor, audit } from '../services/auth.js';
 
 const LIVE = ['ACTIVE', 'HELD', 'RESERVED'];
 
@@ -16,9 +17,11 @@ const countBeds = (beds: { status: string }[]) => ({
 
 export default async function spaceRoutes(app: FastifyInstance) {
   /** 空间树：园区 → 楼栋 → 楼层（带床位与房间统计） */
-  app.get('/api/space/tree', async () => {
+  app.get('/api/space/tree', async (req) => {
+    // 楼栋宿管只看得到自己那几栋楼
+    const scope = buildingScope(req);
     const buildings = await prisma.building.findMany({
-      where: { isActive: true },
+      where: { isActive: true, ...(scope ? { id: { in: scope } } : {}) },
       orderBy: { sortOrder: 'asc' },
       include: {
         nationality: true,
@@ -108,6 +111,7 @@ export default async function spaceRoutes(app: FastifyInstance) {
   /** 修改楼层归属（国籍 / 性别策略） */
   app.put<{ Params: { id: string }; Body: { nationalityId?: string | null; genderPolicy?: string | null; note?: string | null } }>(
     '/api/space/floors/:id',
+    { preHandler: requirePerm('space:write') },
     async (req) => {
       const { nationalityId, genderPolicy, note } = req.body;
       return prisma.floor.update({
@@ -121,7 +125,9 @@ export default async function spaceRoutes(app: FastifyInstance) {
     }
   );
 
-  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/space/buildings/:id', async (req) => {
+  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/space/buildings/:id',
+    { preHandler: requirePerm('space:write') },
+    async (req) => {
     const b = req.body;
     return prisma.building.update({
       where: { id: Number(req.params.id) },
@@ -136,7 +142,9 @@ export default async function spaceRoutes(app: FastifyInstance) {
   });
 
   /** 房间状态与属性维护 */
-  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/space/rooms/:id', async (req, reply) => {
+  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/space/rooms/:id',
+    { preHandler: requirePerm('space:room') },
+    async (req, reply) => {
     const id = Number(req.params.id);
     const b = req.body;
     if (b.status && ['MAINTENANCE', 'LOCKED', 'QUARANTINE'].includes(b.status)) {
@@ -158,6 +166,7 @@ export default async function spaceRoutes(app: FastifyInstance) {
    */
   app.put<{ Params: { id: string }; Body: { capacity: number; deratedReason?: string | null; operator?: string } }>(
     '/api/space/rooms/:id/capacity',
+    { preHandler: requirePerm('space:capacity') },
     async (req, reply) => {
       const id = Number(req.params.id);
       const { capacity, deratedReason } = req.body;
@@ -202,6 +211,10 @@ export default async function spaceRoutes(app: FastifyInstance) {
             });
           }
         }
+      });
+      await audit(req, 'ROOM_CAPACITY', {
+        targetType: 'Room', targetId: id,
+        detail: '核定人数 ' + room.capacity + ' → ' + capacity,
       });
       const updated = await prisma.room.findUnique({ where: { id }, include: ROOM_INCLUDE });
       return serializeRoom(updated);

@@ -225,9 +225,17 @@ model User {
   personId  Int?
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
+  /// scrypt 哈希，格式 salt:hash。为空表示只能用外部平台登录
+  passwordHash String?
+  /// 首次登录必须改密码
+  mustChangePassword Boolean @default(false)
+  lastLoginAt  DateTime?
+  locale       String   @default("zh")
 
-  role      Role           @relation(fields: [roleId], references: [id])
-  buildings UserBuilding[]
+  role          Role              @relation(fields: [roleId], references: [id])
+  buildings     UserBuilding[]
+  identities    IdentityBinding[]
+  notifications Notification[]
 }
 
 /// 用户的数据范围：能管哪几栋楼。为空 = 全部
@@ -433,6 +441,8 @@ model Person {
   workOrders    WorkOrder[]      @relation("Reporter")
   requests      Request[]        @relation("RequestPerson")
   inspectionItems InspectionItem[]
+  identities      IdentityBinding[]
+  notifications   Notification[]
 
   @@index([employmentStatus])
   @@index([departmentId])
@@ -753,4 +763,134 @@ model Device {
 
   @@index([scopeType, scopeId])
   @@index([type])
+}
+
+// ============================== 认证 / 身份 / 集成 ==============================
+
+/// 身份绑定 —— 一个账号可以有多种登录方式，也可以把「员工本人」绑到外部平台
+/// provider: LOCAL 本地密码 / WECOM 企业微信 / DINGTALK 钉钉 / AZURE_AD (Teams·M365)
+///           / LDAP / OA / PHONE 手机验证码 / WHATSAPP
+/// 管理端账号绑 userId；员工自助端绑 personId（不给员工发账号密码）
+model IdentityBinding {
+  id          Int       @id @default(autoincrement())
+  provider    String
+  /// 该平台里的用户唯一标识（企微 UserId / 钉钉 unionId / AAD oid / 手机号）
+  externalId  String
+  userId      Int?
+  personId    Int?
+  displayName String?
+  boundAt     DateTime  @default(now())
+  lastLoginAt DateTime?
+  isActive    Boolean   @default(true)
+
+  user   User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  person Person? @relation(fields: [personId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, externalId])
+  @@index([userId])
+  @@index([personId])
+}
+
+/// 外部平台集成配置。一条 = 一个平台，凭据由管理员在「设置 → 集成对接」填
+/// capabilities 说明这个平台被用来做什么：SSO 登录 / SYNC 人员同步 / NOTIFY 消息 / APPROVAL 审批
+model Integration {
+  id            Int       @id @default(autoincrement())
+  provider      String    @unique
+  nameZh        String
+  nameEn        String
+  nameId        String
+  enabled       Boolean   @default(false)
+  capabilities  String    @default("")
+  /// JSON 字符串。凭据字段（secret / token）在返回给前端时会被打码
+  config        String    @default("{}")
+  /// NOT_CONFIGURED 未配置 / CONFIGURED 已配置 / ERROR 连接异常
+  status        String    @default("NOT_CONFIGURED")
+  lastCheckedAt DateTime?
+  note          String?
+  sortOrder     Int       @default(0)
+}
+
+/// 通知模板（三语）。触发点写在代码里，文案和渠道在这里改
+model NotificationTemplate {
+  id       Int     @id @default(autoincrement())
+  code     String  @unique
+  nameZh   String
+  titleZh  String
+  bodyZh   String
+  titleId  String?
+  bodyId   String?
+  titleEn  String?
+  bodyEn   String?
+  /// 默认发送渠道，逗号分隔：IN_APP,WECOM,DINGTALK,WHATSAPP,SMS,EMAIL
+  channels String  @default("IN_APP")
+  /// 收件人类型：PERSON 员工本人 / USER 管理账号 / ROLE 某个角色的全部账号
+  audience String  @default("PERSON")
+  enabled  Boolean @default(true)
+}
+
+/// 通知发件箱。站内信直接落这张表；外部渠道由 adapter 消费，发完回写状态
+model Notification {
+  id           Int       @id @default(autoincrement())
+  templateCode String?
+  /// IN_APP / WECOM / DINGTALK / WHATSAPP / SMS / EMAIL
+  channel      String    @default("IN_APP")
+  toUserId     Int?
+  toPersonId   Int?
+  /// 外部渠道的收件地址（手机号 / openid），站内信留空
+  toAddress    String?
+  locale       String    @default("zh")
+  title        String
+  body         String
+  /// 点开跳到系统里的哪一页
+  linkPath     String?
+  /// PENDING 待发 / SENT 已发 / FAILED 失败 / SKIPPED 渠道未启用
+  status       String    @default("PENDING")
+  error        String?
+  refType      String?
+  refId        Int?
+  createdAt    DateTime  @default(now())
+  sentAt       DateTime?
+  readAt       DateTime?
+
+  toUser   User?   @relation(fields: [toUserId], references: [id], onDelete: Cascade)
+  toPerson Person? @relation(fields: [toPersonId], references: [id], onDelete: Cascade)
+
+  @@index([toUserId, readAt])
+  @@index([toPersonId, readAt])
+  @@index([status])
+}
+
+/// 人员 / 组织同步日志。Excel 导入和外部平台同步都记在这
+model SyncLog {
+  id          Int       @id @default(autoincrement())
+  provider    String // EXCEL / WECOM / DINGTALK / OA / LDAP
+  kind        String // PERSON / DEPARTMENT
+  startedAt   DateTime  @default(now())
+  finishedAt  DateTime?
+  /// RUNNING / SUCCESS / FAILED
+  status      String    @default("RUNNING")
+  created     Int       @default(0)
+  updated     Int       @default(0)
+  deactivated Int       @default(0)
+  message     String?
+  operator    String?
+
+  @@index([startedAt])
+}
+
+/// 审计日志 —— 有了登录才有意义：谁、什么时候、对谁做了什么
+model AuditLog {
+  id         Int      @id @default(autoincrement())
+  userId     Int?
+  username   String   @default("system")
+  action     String // LOGIN / ASSIGN / TRANSFER / CHECKOUT / APPROVE / CONFIG_CHANGE ...
+  targetType String?
+  targetId   Int?
+  detail     String?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
+  @@index([action])
 }

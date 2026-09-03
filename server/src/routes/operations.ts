@@ -1,6 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../db.js';
 import { nextCode } from '../services/space.js';
+import { requirePerm, actor, audit } from '../services/auth.js';
+import { notify } from '../services/notify.js';
 
 /**
  * 日常运营模块：报修工单 / 违规记录 / 访客登记 / 查寝检查 /
@@ -66,7 +68,9 @@ export default async function operationRoutes(app: FastifyInstance) {
     return { total, page, pageSize, rows: enriched };
   });
 
-  app.post<{ Body: Record<string, any> }>('/api/workorders', async (req) => {
+  app.post<{ Body: Record<string, any> }>('/api/workorders',
+    { preHandler: requirePerm('workorder:write') },
+    async (req) => {
     const b = req.body;
     const cat = await prisma.workOrderCategory.findUnique({ where: { id: Number(b.categoryId) } });
     const wo = await prisma.workOrder.create({
@@ -81,6 +85,13 @@ export default async function operationRoutes(app: FastifyInstance) {
         blocksOccupancy: b.blocksOccupancy ?? cat?.blocksByDefault ?? false,
       },
     });
+    // 紧急或影响住宿的工单，直接推给宿管，不等他们自己刷新页面
+    if (wo.priority === 'URGENT' || wo.blocksOccupancy) {
+      await notify('WORKORDER_ASSIGNED', { roleCode: 'WARDEN' }, {
+        code: wo.code, category: cat?.nameZh ?? '', location: await scopeLabel(wo.scopeType, wo.scopeId),
+        title: wo.title, sla: cat?.slaHours ?? 48,
+      }, { type: 'WORKORDER', id: wo.id, linkPath: '/workorders' });
+    }
     // 影响住宿的工单直接把房间置为维修，避免继续往里排人
     if (wo.blocksOccupancy && wo.scopeType === 'ROOM') {
       await prisma.room.update({ where: { id: wo.scopeId }, data: { status: 'MAINTENANCE', note: `工单 ${wo.code}` } });
@@ -88,7 +99,9 @@ export default async function operationRoutes(app: FastifyInstance) {
     return wo;
   });
 
-  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/workorders/:id', async (req) => {
+  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/workorders/:id',
+    { preHandler: requirePerm('workorder:write') },
+    async (req) => {
     const id = Number(req.params.id);
     const b = req.body;
     const data: any = {};
@@ -101,7 +114,13 @@ export default async function operationRoutes(app: FastifyInstance) {
       if (b.status === 'DONE') data.finishedAt = new Date();
       if (b.status === 'CLOSED') { data.closedAt = new Date(); data.finishedAt = data.finishedAt ?? new Date(); }
     }
-    const wo = await prisma.workOrder.update({ where: { id }, data });
+    const wo = await prisma.workOrder.update({ where: { id }, data, include: { category: true } });
+    // 完成时告诉报修人一声 —— 不然他不知道修好了没
+    if (wo.status === 'DONE' && wo.reportedById) {
+      await notify('WORKORDER_DONE', { personId: wo.reportedById },
+        { code: wo.code, title: wo.title },
+        { type: 'WORKORDER', id: wo.id, linkPath: '/workorders' });
+    }
     // 工单关闭且原本封了房间 → 自动恢复可用
     if (['DONE', 'CLOSED'].includes(wo.status) && wo.blocksOccupancy && wo.scopeType === 'ROOM') {
       const others = await prisma.workOrder.count({
@@ -156,10 +175,10 @@ export default async function operationRoutes(app: FastifyInstance) {
     };
   });
 
-  app.post<{ Body: Record<string, any> }>('/api/violations', async (req) => {
+  app.post<{ Body: Record<string, any> }>('/api/violations', { preHandler: requirePerm('violation:create') }, async (req) => {
     const b = req.body;
     const t = await prisma.violationType.findUnique({ where: { id: Number(b.typeId) } });
-    return prisma.violation.create({
+    const created = await prisma.violation.create({
       data: {
         code: await nextCode('VIO', 'violation'),
         personId: b.personId ? Number(b.personId) : null,
@@ -169,13 +188,23 @@ export default async function operationRoutes(app: FastifyInstance) {
         points: b.points ?? t?.defaultPoints ?? 1,
         fine: b.fine ?? t?.defaultFine ?? 0,
         description: b.description, evidence: b.evidence,
-        recordedBy: b.recordedBy ?? 'admin',
+        recordedBy: b.recordedBy ?? actor(req),
         action: b.action ?? (t && ['CRITICAL', 'HIGH'].includes(t.severity) ? 'FINE' : 'WARNING'),
       },
     });
+    if (created.personId) {
+      await notify('VIOLATION_RECORDED', { personId: created.personId }, {
+        type: t?.nameZh ?? '', points: created.points,
+        fine: created.fine ? `、罚款 ¥${created.fine}` : '',
+      }, { type: 'VIOLATION', id: created.id, linkPath: '/violations' });
+    }
+    await audit(req, 'VIOLATION_CREATE', { targetType: 'Violation', targetId: created.id, detail: t?.nameZh });
+    return created;
   });
 
-  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/violations/:id', async (req) => {
+  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/violations/:id',
+    { preHandler: requirePerm('violation:write') },
+    async (req) => {
     const data: any = { ...req.body };
     if (data.status === 'HANDLED' && !data.handledAt) data.handledAt = new Date();
     return prisma.violation.update({ where: { id: Number(req.params.id) }, data });
@@ -235,7 +264,9 @@ export default async function operationRoutes(app: FastifyInstance) {
     }));
   });
 
-  app.post<{ Body: Record<string, any> }>('/api/visitors', async (req) => {
+  app.post<{ Body: Record<string, any> }>('/api/visitors',
+    { preHandler: requirePerm('visitor:write') },
+    async (req) => {
     const b = req.body;
     return prisma.visitor.create({
       data: {
@@ -252,7 +283,9 @@ export default async function operationRoutes(app: FastifyInstance) {
     });
   });
 
-  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/visitors/:id', async (req) => {
+  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/visitors/:id',
+    { preHandler: requirePerm('visitor:write') },
+    async (req) => {
     const data: any = { ...req.body };
     if (data.status === 'OUT' && !data.checkOutAt) data.checkOutAt = new Date();
     if (data.expectedOutAt) data.expectedOutAt = new Date(data.expectedOutAt);
@@ -313,6 +346,7 @@ export default async function operationRoutes(app: FastifyInstance) {
   /** 发起一次查寝：自动把该楼层当前在住的人拉成点名清单 */
   app.post<{ Body: { type: string; scopeType: string; scopeId: number; inspector?: string; plannedAt?: string } }>(
     '/api/inspections',
+    { preHandler: requirePerm('inspection:write') },
     async (req) => {
       const { type, scopeType, scopeId, inspector, plannedAt } = req.body;
       const ins = await prisma.inspection.create({
@@ -347,11 +381,15 @@ export default async function operationRoutes(app: FastifyInstance) {
     }
   );
 
-  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/inspection-items/:id', async (req) =>
+  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/inspection-items/:id',
+    { preHandler: requirePerm('inspection:write') },
+    async (req) =>
     prisma.inspectionItem.update({ where: { id: Number(req.params.id) }, data: req.body })
   );
 
-  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/inspections/:id', async (req) => {
+  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/inspections/:id',
+    { preHandler: requirePerm('inspection:write') },
+    async (req) => {
     const data: any = { ...req.body };
     if (data.status === 'DONE' && !data.executedAt) data.executedAt = new Date();
     return prisma.inspection.update({ where: { id: Number(req.params.id) }, data });
@@ -376,12 +414,14 @@ export default async function operationRoutes(app: FastifyInstance) {
 
   app.post<{ Body: { personId: number; itemTypeId: number; quantity?: number; bedId?: number; occupancyId?: number; issuedBy?: string } }>(
     '/api/issued-items',
+    { preHandler: requirePerm('item:write') },
     async (req) => prisma.issuedItem.create({ data: { ...req.body, quantity: req.body.quantity ?? 1 } })
   );
 
   /** 归还 / 报损。损坏或遗失自动按单价算赔偿 */
   app.put<{ Params: { id: string }; Body: { condition?: string; compensation?: number; returnedBy?: string } }>(
     '/api/issued-items/:id/return',
+    { preHandler: requirePerm('item:write') },
     async (req) => {
       const id = Number(req.params.id);
       const item = await prisma.issuedItem.findUnique({ where: { id }, include: { itemType: true } });
@@ -437,7 +477,9 @@ export default async function operationRoutes(app: FastifyInstance) {
     }));
   });
 
-  app.post<{ Body: Record<string, any> }>('/api/requests', async (req) => {
+  app.post<{ Body: Record<string, any> }>('/api/requests',
+    { preHandler: requirePerm('request:read') },
+    async (req) => {
     const b = req.body;
     return prisma.request.create({
       data: {
@@ -452,15 +494,30 @@ export default async function operationRoutes(app: FastifyInstance) {
 
   app.put<{ Params: { id: string }; Body: { status: string; comment?: string; approvedBy?: string } }>(
     '/api/requests/:id',
-    async (req) => prisma.request.update({
-      where: { id: Number(req.params.id) },
-      data: {
-        status: req.body.status,
-        comment: req.body.comment,
-        approvedBy: req.body.approvedBy ?? 'admin',
-        approvedAt: new Date(),
-      },
-    })
+    { preHandler: requirePerm('request:write') },
+    async (req) => {
+      const updated = await prisma.request.update({
+        where: { id: Number(req.params.id) },
+        data: {
+          status: req.body.status,
+          comment: req.body.comment,
+          approvedBy: req.body.approvedBy ?? actor(req),
+          approvedAt: new Date(),
+        },
+      });
+      const TYPE_ZH: Record<string, string> = {
+        CHECKIN: '入住申请', TRANSFER: '调宿申请', CHECKOUT: '退宿申请',
+        COUPLE_ROOM: '夫妻房申请', VISITOR_OVERNIGHT: '访客留宿', EXTRA_BED: '加床申请',
+      };
+      if (updated.status === 'APPROVED' || updated.status === 'REJECTED') {
+        await notify(updated.status === 'APPROVED' ? 'REQUEST_APPROVED' : 'REQUEST_REJECTED',
+          { personId: updated.personId },
+          { code: updated.code, type: TYPE_ZH[updated.type] ?? updated.type, comment: updated.comment ?? '—' },
+          { type: 'REQUEST', id: updated.id, linkPath: '/requests' });
+      }
+      await audit(req, `REQUEST_${updated.status}`, { targetType: 'Request', targetId: updated.id, detail: updated.code });
+      return updated;
+    }
   );
 
   // ==================================================== 公告
@@ -473,13 +530,17 @@ export default async function operationRoutes(app: FastifyInstance) {
     return prisma.announcement.findMany({ where, orderBy: { publishedAt: 'desc' }, take: 100 });
   });
 
-  app.post<{ Body: Record<string, any> }>('/api/announcements', async (req) => {
+  app.post<{ Body: Record<string, any> }>('/api/announcements',
+    { preHandler: requirePerm('config:write') },
+    async (req) => {
     const b = { ...req.body };
     if (b.expiresAt) b.expiresAt = new Date(b.expiresAt);
     return prisma.announcement.create({ data: { ...b, publishedBy: b.publishedBy ?? 'admin' } as any });
   });
 
-  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/announcements/:id', async (req) => {
+  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/announcements/:id',
+    { preHandler: requirePerm('config:write') },
+    async (req) => {
     const b = { ...req.body };
     if (b.expiresAt) b.expiresAt = new Date(b.expiresAt);
     return prisma.announcement.update({ where: { id: Number(req.params.id) }, data: b });

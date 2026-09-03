@@ -1,25 +1,43 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { prisma } from './db.js';
+import { attachAuth } from './services/auth.js';
+import authRoutes from './routes/auth.js';
 import spaceRoutes from './routes/space.js';
 import personRoutes from './routes/persons.js';
 import allocationRoutes from './routes/allocation.js';
 import reportRoutes from './routes/reports.js';
 import configRoutes from './routes/config.js';
 import operationRoutes from './routes/operations.js';
+import integrationRoutes from './routes/integrations.js';
 
 const app = Fastify({ logger: { transport: undefined, level: 'warn' } });
 
 await app.register(cors, { origin: true });
 
+/** 不需要登录就能访问的白名单 */
+const PUBLIC_PATHS = [/^\/api\/health$/, /^\/api\/auth\/login$/, /^\/api\/auth\/methods$/, /^\/api\/auth\/sso\//];
+
+app.addHook('onRequest', async (req, reply) => {
+  await attachAuth(req);
+  const url = req.url.split('?')[0];
+  if (PUBLIC_PATHS.some((p) => p.test(url))) return;
+  if (!url.startsWith('/api/')) return;
+  if (!req.auth) {
+    return reply.code(401).send({ error: '未登录或登录已过期', code: 'UNAUTHENTICATED' });
+  }
+});
+
 app.get('/api/health', async () => ({ ok: true, ts: new Date().toISOString() }));
 
+await app.register(authRoutes);
 await app.register(configRoutes);
 await app.register(spaceRoutes);
 await app.register(personRoutes);
 await app.register(allocationRoutes);
 await app.register(reportRoutes);
 await app.register(operationRoutes);
+await app.register(integrationRoutes);
 
 // 用独立的 API_PORT，避免被外部工具注入的 PORT 抢占前端端口
 const port = Number(process.env.API_PORT ?? 3101);

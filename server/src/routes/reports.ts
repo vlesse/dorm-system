@@ -1,14 +1,17 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma, getSetting } from '../db.js';
 import { nextLeaveDue } from './persons.js';
+import { buildingScope } from '../services/auth.js';
 
 const LIVE = ['ACTIVE', 'HELD', 'RESERVED'];
 const OUT_OF_SERVICE = ['MAINTENANCE', 'LOCKED', 'DISABLED'];
 
 export default async function reportRoutes(app: FastifyInstance) {
   /** 总览看板 */
-  app.get('/api/dashboard', async () => {
-    const beds = await prisma.bed.groupBy({ by: ['status'], _count: true });
+  app.get('/api/dashboard', async (req) => {
+    const scope = buildingScope(req);
+    const bedScope = scope ? { room: { floor: { buildingId: { in: scope } } } } : {};
+    const beds = await prisma.bed.groupBy({ by: ['status'], _count: true, where: bedScope });
     const bedStats: Record<string, number> = {};
     for (const b of beds) bedStats[b.status] = b._count;
     const totalBeds = beds.reduce((s, b) => s + b._count, 0);
@@ -19,6 +22,7 @@ export default async function reportRoutes(app: FastifyInstance) {
     const usable = totalBeds - disabled - oos;
 
     const buildings = await prisma.building.findMany({
+      where: scope ? { id: { in: scope } } : {},
       orderBy: { sortOrder: 'asc' },
       include: {
         nationality: true,
@@ -48,7 +52,7 @@ export default async function reportRoutes(app: FastifyInstance) {
     });
 
     const liveOcc = await prisma.occupancy.findMany({
-      where: { status: { in: ['ACTIVE', 'HELD'] } },
+      where: { status: { in: ['ACTIVE', 'HELD'] }, ...(scope ? { bed: bedScope } : {}) },
       include: {
         person: { include: { nationality: true, department: true, positionLevel: true, contractor: true, religion: true } },
         bed: { include: { room: { include: { roomType: true } } } },
@@ -75,18 +79,25 @@ export default async function reportRoutes(app: FastifyInstance) {
     const byPersonType = toRows(tally(liveOcc.map((o) =>
       ({ EMPLOYEE: '员工', DEPENDENT: '家属随迁', VISITOR: '长期访客', INTERN: '实习生' } as any)[o.person.personType] ?? o.person.personType)));
 
+    // 有楼栋范围时，人员口径 = 住在这几栋楼里的人；没范围时才是全园区
+    const inScopeOcc = scope ? { some: { status: { in: LIVE }, bed: bedScope } } : { some: { status: { in: LIVE } } };
     const [personTotal, employeeTotal, dependentTotal, housed, unhoused] = await Promise.all([
-      prisma.person.count(),
-      prisma.person.count({ where: { personType: 'EMPLOYEE' } }),
-      prisma.person.count({ where: { personType: 'DEPENDENT' } }),
-      prisma.person.count({ where: { occupancies: { some: { status: { in: LIVE } } } } }),
-      prisma.person.count({ where: { employmentStatus: { not: 'RESIGNED' }, occupancies: { none: { status: { in: LIVE } } } } }),
+      scope ? prisma.person.count({ where: { occupancies: inScopeOcc } }) : prisma.person.count(),
+      prisma.person.count({ where: { personType: 'EMPLOYEE', ...(scope ? { occupancies: inScopeOcc } : {}) } }),
+      prisma.person.count({ where: { personType: 'DEPENDENT', ...(scope ? { occupancies: inScopeOcc } : {}) } }),
+      prisma.person.count({ where: { occupancies: inScopeOcc } }),
+      scope ? 0 as any : prisma.person.count({ where: { employmentStatus: { not: 'RESIGNED' }, occupancies: { none: { status: { in: LIVE } } } } }),
     ]);
 
     // 房型维度：核定 vs 标称 vs 实住
     const roomTypeRows = await prisma.roomType.findMany({
       orderBy: { sortOrder: 'asc' },
-      include: { rooms: { include: { beds: { select: { status: true } } } } },
+      include: {
+        rooms: {
+          where: scope ? { floor: { buildingId: { in: scope } } } : {},
+          include: { beds: { select: { status: true } } },
+        },
+      },
     });
     const roomTypeStats = roomTypeRows.map((rt) => {
       const rooms = rt.rooms;
@@ -107,13 +118,18 @@ export default async function reportRoutes(app: FastifyInstance) {
       };
     }).filter((r) => r.roomCount > 0);
 
+    // 工单挂在房间上，范围内的房间 id 先算出来
+    const scopedRoomIds = scope
+      ? (await prisma.room.findMany({ where: { floor: { buildingId: { in: scope } } }, select: { id: true } })).map((r) => r.id)
+      : null;
+    const woScope = scopedRoomIds ? { scopeType: 'ROOM', scopeId: { in: scopedRoomIds } } : {};
     const [woOpen, woOverdueRaw, vioOpen, visitorIn, reqPending] = await Promise.all([
-      prisma.workOrder.count({ where: { status: { in: ['NEW', 'ASSIGNED', 'IN_PROGRESS'] } } }),
+      prisma.workOrder.count({ where: { status: { in: ['NEW', 'ASSIGNED', 'IN_PROGRESS'] }, ...woScope } }),
       prisma.workOrder.findMany({
-        where: { status: { in: ['NEW', 'ASSIGNED', 'IN_PROGRESS'] } },
+        where: { status: { in: ['NEW', 'ASSIGNED', 'IN_PROGRESS'] }, ...woScope },
         include: { category: true },
       }),
-      prisma.violation.count({ where: { status: 'OPEN' } }),
+      prisma.violation.count({ where: { status: 'OPEN', ...(scopedRoomIds ? { roomId: { in: scopedRoomIds } } : {}) } }),
       prisma.visitor.count({ where: { status: 'IN' } }),
       prisma.request.count({ where: { status: 'PENDING' } }),
     ]);
@@ -121,7 +137,7 @@ export default async function reportRoutes(app: FastifyInstance) {
       (w) => Date.now() > w.reportedAt.getTime() + w.category.slaHours * 3600000
     ).length;
 
-    const alerts = await computeAlerts();
+    const alerts = await computeAlerts(scope);
     const alertCounts = Object.fromEntries(
       Object.entries(alerts).filter(([, v]) => Array.isArray(v)).map(([k, v]) => [k, (v as any[]).length])
     );
@@ -143,14 +159,15 @@ export default async function reportRoutes(app: FastifyInstance) {
   });
 
   /** 待办告警 */
-  app.get('/api/alerts', async () => computeAlerts());
+  app.get('/api/alerts', async (req) => computeAlerts(buildingScope(req)));
 
   /** 在住花名册 */
-  app.get<{ Querystring: Record<string, string | undefined> }>('/api/roster', async (req) => rosterRows(req.query));
+  app.get<{ Querystring: Record<string, string | undefined> }>('/api/roster', async (req) =>
+    rosterRows(req.query, buildingScope(req)));
 
   /** 花名册 CSV 导出，带 BOM，Excel 直接打开不乱码 */
   app.get<{ Querystring: Record<string, string | undefined> }>('/api/roster.csv', async (req, reply) => {
-    const rows = await rosterRows(req.query);
+    const rows = await rosterRows(req.query, buildingScope(req));
     const header = ['楼栋', '楼层', '房间', '房型', '床位', '工号', '姓名', '人员类型', '性别', '国籍',
       '证件类型', '证件号', '证件到期', '部门', '职级', '班次', '雇佣主体', '宗教', '联系电话',
       '紧急联系人', '紧急电话', '入住日期', '住宿状态'];
@@ -177,8 +194,12 @@ export default async function reportRoutes(app: FastifyInstance) {
    * 这是应急时最先要的东西，要能一屏看完。
    */
   app.get<{ Querystring: { buildingId?: string } }>('/api/evacuation', async (req) => {
+    const scope = buildingScope(req);
     const buildings = await prisma.building.findMany({
-      where: req.query.buildingId ? { id: Number(req.query.buildingId) } : {},
+      where: {
+        ...(req.query.buildingId ? { id: Number(req.query.buildingId) } : {}),
+        ...(scope ? { id: { in: scope } } : {}),
+      },
       orderBy: { sortOrder: 'asc' },
       include: {
         floors: {
@@ -221,8 +242,9 @@ export default async function reportRoutes(app: FastifyInstance) {
   });
 }
 
-async function rosterRows(q: Record<string, string | undefined>) {
+async function rosterRows(q: Record<string, string | undefined>, scope: number[] | null = null) {
   const where: any = { status: { in: LIVE } };
+  if (scope) where.bed = { room: { floor: { buildingId: { in: scope } } } };
   if (q.floorId) where.bed = { room: { floorId: Number(q.floorId) } };
   else if (q.buildingId) where.bed = { room: { floor: { buildingId: Number(q.buildingId) } } };
   if (q.nationalityId) where.person = { ...(where.person ?? {}), nationalityId: q.nationalityId };
@@ -263,7 +285,7 @@ async function rosterRows(q: Record<string, string | undefined>) {
 /**
  * 全部待办告警。每一条都是实际运营里会出问题、而且不查就发现不了的地方。
  */
-async function computeAlerts() {
+async function computeAlerts(scope: number[] | null = null) {
   const [warningDays, idWarnDays, staleDays, pointsThreshold] = await Promise.all([
     getSetting<number>('leave.warningDays', 30),
     getSetting<number>('id.expiryWarningDays', 90),
@@ -271,9 +293,18 @@ async function computeAlerts() {
     getSetting<number>('violation.pointsThreshold', 10),
   ]);
 
+  // 有楼栋范围时，所有「跟位置有关」的告警都只看范围内的
+  const bedScope = scope ? { room: { floor: { buildingId: { in: scope } } } } : null;
+  const roomScope = scope ? { floor: { buildingId: { in: scope } } } : {};
+  /** 该人当前是否住在范围内 —— 人员类告警靠这个收口 */
+  const personInScope = bedScope ? { occupancies: { some: { status: { in: LIVE }, bed: bedScope } } } : {};
+
   // 1. 已离职但床位没释放
   const resignedRows = await prisma.occupancy.findMany({
-    where: { status: { in: LIVE }, person: { employmentStatus: 'RESIGNED' } },
+    where: {
+      status: { in: LIVE }, person: { employmentStatus: 'RESIGNED' },
+      ...(bedScope ? { bed: bedScope } : {}),
+    },
     include: {
       person: { include: { department: true, nationality: true } },
       bed: { include: { room: { include: { floor: { include: { building: true } } } } } },
@@ -282,7 +313,10 @@ async function computeAlerts() {
 
   // 2. 休假即将到期
   const actives = await prisma.person.findMany({
-    where: { employmentStatus: 'ACTIVE', cycleStartDate: { not: null }, positionLevelId: { not: null } },
+    where: {
+      employmentStatus: 'ACTIVE', cycleStartDate: { not: null }, positionLevelId: { not: null },
+      ...personInScope,
+    },
     include: { positionLevel: true, department: true },
   });
   const leaveDueSoon = actives
@@ -300,7 +334,10 @@ async function computeAlerts() {
 
   // 3. 已分配床位但超期未入住
   const reservedStale = await prisma.occupancy.findMany({
-    where: { status: 'RESERVED', createdAt: { lt: new Date(Date.now() - staleDays * 86400000) } },
+    where: {
+      status: 'RESERVED', createdAt: { lt: new Date(Date.now() - staleDays * 86400000) },
+      ...(bedScope ? { bed: bedScope } : {}),
+    },
     include: { person: true, bed: true },
   });
 
@@ -320,6 +357,7 @@ async function computeAlerts() {
     where: {
       employmentStatus: { not: 'RESIGNED' },
       idExpiryDate: { not: null, lte: new Date(Date.now() + idWarnDays * 86400000) },
+      ...personInScope,
     },
     include: { department: true, nationality: true },
     orderBy: { idExpiryDate: 'asc' },
@@ -363,6 +401,7 @@ async function computeAlerts() {
 
   // 8. 房间超住：在住人数超过核定人数（加床、私自挤住都会体现在这里）
   const roomsAll = await prisma.room.findMany({
+    where: roomScope,
     include: {
       roomType: true,
       floor: { include: { building: true } },
@@ -431,7 +470,7 @@ async function computeAlerts() {
 
   // 12. 家属没跟挂靠员工同房
   const dependents = await prisma.person.findMany({
-    where: { personType: 'DEPENDENT', hostPersonId: { not: null } },
+    where: { personType: 'DEPENDENT', hostPersonId: { not: null }, ...personInScope },
     include: {
       occupancies: { where: { status: { in: LIVE } }, include: { bed: { include: { room: true } } } },
       hostPerson: { include: { occupancies: { where: { status: { in: LIVE } }, include: { bed: true } } } },

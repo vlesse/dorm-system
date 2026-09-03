@@ -6,6 +6,7 @@ import enUS from 'antd/locale/en_US';
 import idID from 'antd/locale/id_ID';
 import { BrowserRouter } from 'react-router-dom';
 import App from './App';
+import { AuthProvider } from './auth';
 import { LangContext, type Lang } from './i18n';
 import './styles.css';
 
@@ -30,7 +31,9 @@ function Root() {
       >
         <AntApp>
           <BrowserRouter>
-            <App />
+            <AuthProvider>
+              <App />
+            </AuthProvider>
           </BrowserRouter>
         </AntApp>
       </ConfigProvider>

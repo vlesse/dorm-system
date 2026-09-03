@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../db.js';
 import { PERSON_INCLUDE, parseLangs } from '../services/space.js';
+import { requirePerm } from '../services/auth.js';
 
 const LIVE = ['ACTIVE', 'HELD', 'RESERVED'];
 
@@ -176,7 +177,9 @@ export default async function personRoutes(app: FastifyInstance) {
     };
   });
 
-  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/persons/:id', async (req) => {
+  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/persons/:id',
+    { preHandler: requirePerm('person:write') },
+    async (req) => {
     const id = Number(req.params.id);
     const allowed = ['name', 'nameLocal', 'gender', 'nationalityId', 'idType', 'idNumber', 'idExpiryDate',
       'passportHeld', 'phone', 'emergencyContact', 'emergencyPhone', 'departmentId', 'positionLevelId',
@@ -192,7 +195,9 @@ export default async function personRoutes(app: FastifyInstance) {
     return prisma.person.update({ where: { id }, data });
   });
 
-  app.post<{ Body: Record<string, any> }>('/api/persons', async (req) => {
+  app.post<{ Body: Record<string, any> }>('/api/persons',
+    { preHandler: requirePerm('person:write') },
+    async (req) => {
     const b = { ...req.body };
     for (const k of ['cycleStartDate', 'birthDate', 'idExpiryDate', 'hireDate']) if (b[k]) b[k] = new Date(b[k]);
     if (Array.isArray(b.languages)) b.languages = b.languages.join(',');
@@ -232,6 +237,7 @@ export default async function personRoutes(app: FastifyInstance) {
 
   app.post<{ Body: { personId: number; relatedPersonId: number; type: string; verified?: boolean; verifiedBy?: string; note?: string } }>(
     '/api/relationships',
+    { preHandler: requirePerm('person:write') },
     async (req, reply) => {
       const { personId, relatedPersonId, type } = req.body;
       if (personId === relatedPersonId) return reply.code(400).send({ error: '不能与自己建立关系' });
@@ -251,10 +257,13 @@ export default async function personRoutes(app: FastifyInstance) {
 
   app.put<{ Params: { id: string }; Body: { verified?: boolean; verifiedBy?: string; note?: string } }>(
     '/api/relationships/:id',
+    { preHandler: requirePerm('person:write') },
     async (req) => prisma.relationship.update({ where: { id: Number(req.params.id) }, data: req.body })
   );
 
-  app.delete<{ Params: { id: string } }>('/api/relationships/:id', async (req) =>
+  app.delete<{ Params: { id: string } }>('/api/relationships/:id',
+    { preHandler: requirePerm('person:write') },
+    async (req) =>
     prisma.relationship.delete({ where: { id: Number(req.params.id) } })
   );
 

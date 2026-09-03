@@ -1,10 +1,28 @@
 const BASE = '/api';
 
+const TOKEN_KEY = 'dorm.token';
+export const getToken = () => localStorage.getItem(TOKEN_KEY);
+export const setToken = (t: string | null) =>
+  t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY);
+
+/** 401 时通知外层跳登录页 —— 由 auth.tsx 注册 */
+let onUnauthenticated: (() => void) | null = null;
+export const setUnauthenticatedHandler = (fn: () => void) => { onUnauthenticated = fn; };
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getToken();
   const res = await fetch(BASE + path, {
-    headers: { 'Content-Type': 'application/json' },
     ...init,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(init?.headers ?? {}),
+    },
   });
+  if (res.status === 401) {
+    setToken(null);
+    onUnauthenticated?.();
+  }
   const text = await res.text();
   const body = text ? JSON.parse(text) : null;
   if (!res.ok) {
@@ -104,6 +122,31 @@ export const api = {
   settings: () => req<any[]>('/config/settings'),
   saveSetting: (key: string, value: any) => put(`/config/settings/${key}`, { value }),
   dict: (name: string) => req<any[]>(`/config/${name}`),
+
+  // 认证
+  authMethods: () => req<any>('/auth/methods'),
+  login: (username: string, password: string) => post('/auth/login', { username, password }),
+  me: () => req<any>('/auth/me'),
+  logout: () => post('/auth/logout', {}),
+  changePassword: (oldPassword: string, newPassword: string) =>
+    post('/auth/change-password', { oldPassword, newPassword }),
+  users: () => req<any[]>('/users'),
+  createUser: (b: any) => post('/users', b),
+  updateUser: (id: number, b: any) => put(`/users/${id}`, b),
+  auditLogs: (q: Record<string, any> = {}) => req<any>(`/audit-logs${qs(q)}`),
+
+  // 集成与通知
+  integrations: () => req<any[]>('/integrations'),
+  updateIntegration: (id: number, b: any) => put(`/integrations/${id}`, b),
+  testIntegration: (id: number) => post(`/integrations/${id}/test`, {}),
+  notifications: (q: Record<string, any> = {}) => req<any>(`/notifications${qs(q)}`),
+  readNotification: (id: number) => put(`/notifications/${id}/read`, {}),
+  readAllNotifications: () => put('/notifications/read-all', {}),
+  flushNotifications: () => post('/notifications/flush', {}),
+  notificationTemplates: () => req<any[]>('/notification-templates'),
+  updateNotificationTemplate: (id: number, b: any) => put(`/notification-templates/${id}`, b),
+  syncLogs: () => req<any[]>('/sync-logs'),
+  syncPersons: (rows: any[], provider = 'EXCEL') => post('/sync/persons', { rows, provider }),
   updateDict: (name: string, id: string | number, b: any) => put(`/config/${name}/${id}`, b),
   createDict: (name: string, b: any) => post(`/config/${name}`, b),
 };

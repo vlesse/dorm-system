@@ -16,6 +16,7 @@
  */
 import { PrismaClient } from '@prisma/client';
 import { DEFAULT_RULES } from '../src/services/rules.js';
+import { seedPlatform } from './seed-platform.js';
 
 const prisma = new PrismaClient();
 
@@ -151,6 +152,7 @@ function bedLayout(nominal: number, typeCode: string): Array<{ label: string; po
 async function main() {
   console.log('清空旧数据…');
   const order = [
+    'auditLog', 'notification', 'notificationTemplate', 'syncLog', 'identityBinding', 'integration',
     'inspectionItem', 'inspection', 'visitor', 'violation', 'workOrder',
     'deposit', 'issuedItem', 'request', 'occupancyEvent', 'occupancy',
     'relationship', 'person', 'asset', 'bed', 'room', 'floor',
@@ -1043,6 +1045,9 @@ async function main() {
     });
   }
   await createManyChunked(prisma.device, deviceRows);
+
+  // ============================== 平台层（账号 / 集成 / 通知） ==============================
+  await seedPlatform(prisma, buildingIds);
 
   // ============================== 汇总 ==============================
   const [bedTotal, bedUsable, occCount, personCount, deratedCount, funcRoomCount] = await Promise.all([

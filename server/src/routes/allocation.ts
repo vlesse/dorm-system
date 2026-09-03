@@ -4,6 +4,8 @@ import { evaluateAssignment, splitChecks, scoreAssignment } from '../services/ru
 import {
   ROOM_INCLUDE, PERSON_INCLUDE, personToLike, roomToContext, serializeRoom, spouseIdsOf,
 } from '../services/space.js';
+import { requirePerm, actor, audit } from '../services/auth.js';
+import { notify } from '../services/notify.js';
 
 const LIVE = ['ACTIVE', 'HELD', 'RESERVED'];
 
@@ -117,8 +119,10 @@ export default async function allocationRoutes(app: FastifyInstance) {
   /** 分配 / 入住。force=true 可越过软约束（硬约束永远拦） */
   app.post<{ Body: { personId: number; bedId: number; operator?: string; note?: string; force?: boolean; reserveOnly?: boolean } }>(
     '/api/allocation/assign',
+    { preHandler: requirePerm('allocation:write') },
     async (req, reply) => {
-      const { personId, bedId, operator = 'admin', note, force = false, reserveOnly = false } = req.body;
+      const { personId, bedId, note, force = false, reserveOnly = false } = req.body;
+      const operator = req.body.operator ?? actor(req);
       const person = await prisma.person.findUnique({ where: { id: personId }, include: PERSON_INCLUDE });
       if (!person) return reply.code(404).send({ error: '人员不存在' });
       if (person.employmentStatus === 'RESIGNED')
@@ -148,6 +152,10 @@ export default async function allocationRoutes(app: FastifyInstance) {
         });
         return occ;
       });
+      await audit(req, 'ASSIGN', { targetType: 'Person', targetId: personId, detail: bed.code });
+      await notify('BED_ASSIGNED', { personId }, {
+        name: person.name, room: bed.room.code, bed: bed.label,
+      }, { type: 'OCCUPANCY', id: result.id, linkPath: '/beds' });
       return { ok: true, occupancy: result, warnings };
     }
   );
@@ -155,8 +163,10 @@ export default async function allocationRoutes(app: FastifyInstance) {
   /** 调宿：结束旧记录 + 新建新记录，历史两条都留着 */
   app.post<{ Body: { personId: number; toBedId: number; operator?: string; reason?: string; force?: boolean } }>(
     '/api/allocation/transfer',
+    { preHandler: requirePerm('allocation:write') },
     async (req, reply) => {
-      const { personId, toBedId, operator = 'admin', reason, force = false } = req.body;
+      const { personId, toBedId, reason, force = false } = req.body;
+      const operator = req.body.operator ?? actor(req);
       const person = await prisma.person.findUnique({ where: { id: personId }, include: PERSON_INCLUDE });
       if (!person) return reply.code(404).send({ error: '人员不存在' });
       const existing = await currentOccupancy(personId);
@@ -190,6 +200,13 @@ export default async function allocationRoutes(app: FastifyInstance) {
         });
         return occ;
       });
+      await audit(req, 'TRANSFER', {
+        targetType: 'Person', targetId: personId,
+        detail: `${existing.bed.code} → ${bed.code}`,
+      });
+      await notify('TRANSFER_DONE', { personId }, {
+        name: person.name, from: existing.bed.room.code, to: bed.room.code,
+      }, { type: 'OCCUPANCY', id: out.id, linkPath: '/beds' });
       return { ok: true, occupancy: out, warnings };
     }
   );
@@ -200,8 +217,10 @@ export default async function allocationRoutes(app: FastifyInstance) {
    */
   app.post<{ Body: { personId: number; operator?: string; reason?: string; settleItems?: boolean; force?: boolean } }>(
     '/api/allocation/checkout',
+    { preHandler: requirePerm('allocation:write') },
     async (req, reply) => {
-      const { personId, operator = 'admin', reason, settleItems = false, force = false } = req.body;
+      const { personId, reason, settleItems = false, force = false } = req.body;
+      const operator = req.body.operator ?? actor(req);
       const existing = await currentOccupancy(personId);
       if (!existing) return reply.code(400).send({ error: '该人员当前没有在住床位' });
 
@@ -239,13 +258,17 @@ export default async function allocationRoutes(app: FastifyInstance) {
           data: { type: 'CHECKOUT', personId, bedId: existing.bedId, operator, note: reason },
         });
       });
+      await audit(req, 'CHECKOUT', {
+        targetType: 'Person', targetId: personId, detail: `${existing.bed.code} ${reason ?? ''}`,
+      });
       return { ok: true, freedBed: existing.bed.code, settledItems: settleItems ? pending.length : 0 };
     }
   );
 
   /** 休假保留床位 / 返岗恢复 */
   app.post<{ Body: { personId: number; operator?: string; note?: string } }>('/api/allocation/hold', async (req, reply) => {
-    const { personId, operator = 'admin', note } = req.body;
+    const { personId, note } = req.body;
+    const operator = req.body.operator ?? actor(req);
     const existing = await currentOccupancy(personId);
     if (!existing) return reply.code(400).send({ error: '该人员当前没有床位' });
     await prisma.$transaction(async (tx) => {
@@ -258,7 +281,8 @@ export default async function allocationRoutes(app: FastifyInstance) {
   });
 
   app.post<{ Body: { personId: number; operator?: string } }>('/api/allocation/resume', async (req, reply) => {
-    const { personId, operator = 'admin' } = req.body;
+    const { personId } = req.body;
+    const operator = req.body.operator ?? actor(req);
     const existing = await currentOccupancy(personId);
     if (!existing) return reply.code(400).send({ error: '该人员当前没有保留床位' });
     await prisma.$transaction(async (tx) => {
@@ -279,8 +303,10 @@ export default async function allocationRoutes(app: FastifyInstance) {
    */
   app.post<{ Body: { personIdA: number; personIdB: number; roomId: number; operator?: string; force?: boolean } }>(
     '/api/allocation/assign-couple',
+    { preHandler: requirePerm('allocation:write') },
     async (req, reply) => {
-      const { personIdA, personIdB, roomId, operator = 'admin', force = false } = req.body;
+      const { personIdA, personIdB, roomId, force = false } = req.body;
+      const operator = req.body.operator ?? actor(req);
       const room = await prisma.room.findUnique({ where: { id: roomId }, include: ROOM_INCLUDE });
       if (!room) return reply.code(404).send({ error: '房间不存在' });
       if (!room.roomType.isCoupleRoom) return reply.code(400).send({ error: '该房间不是夫妻房 / 家庭房' });
@@ -333,7 +359,8 @@ export default async function allocationRoutes(app: FastifyInstance) {
   app.post<{ Body: { roomId: number; label?: string; operator?: string; reason?: string } }>(
     '/api/allocation/extra-bed',
     async (req, reply) => {
-      const { roomId, label, operator = 'admin', reason } = req.body;
+      const { roomId, label, reason } = req.body;
+      const operator = req.body.operator ?? actor(req);
       const room = await prisma.room.findUnique({ where: { id: roomId }, include: { beds: true, roomType: true } });
       if (!room) return reply.code(404).send({ error: '房间不存在' });
       if (!room.roomType.isResidential) return reply.code(400).send({ error: '功能房不能加床' });

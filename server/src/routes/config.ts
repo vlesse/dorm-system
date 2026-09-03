@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../db.js';
 import { DEFAULT_RULES, RULE_META } from '../services/rules.js';
+import { requirePerm, audit } from '../services/auth.js';
 
 /**
  * 配置接口。所有业务口径都在这里改，不用动代码：
@@ -76,12 +77,14 @@ export default async function configRoutes(app: FastifyInstance) {
 
     app.get(`/api/config/${path}`, async () => repo().findMany());
 
-    app.post<{ Body: Record<string, any> }>(`/api/config/${path}`, async (req) =>
-      repo().create({ data: req.body })
+    app.post<{ Body: Record<string, any> }>(`/api/config/${path}`,
+      { preHandler: requirePerm('config:write') },
+      async (req) => repo().create({ data: req.body })
     );
 
     app.put<{ Params: { id: string }; Body: Record<string, any> }>(
       `/api/config/${path}/:id`,
+      { preHandler: requirePerm('config:write') },
       async (req) => {
         const id = model === 'nationality' ? req.params.id : Number(req.params.id);
         const { id: _drop, ...data } = req.body;
@@ -89,7 +92,9 @@ export default async function configRoutes(app: FastifyInstance) {
       }
     );
 
-    app.delete<{ Params: { id: string } }>(`/api/config/${path}/:id`, async (req, reply) => {
+    app.delete<{ Params: { id: string } }>(`/api/config/${path}/:id`,
+      { preHandler: requirePerm('config:write') },
+      async (req, reply) => {
       const id = model === 'nationality' ? req.params.id : Number(req.params.id);
       try {
         // 字典一律软删除，避免历史记录断链
@@ -103,8 +108,11 @@ export default async function configRoutes(app: FastifyInstance) {
   /** 设置项读写（含排宿规则与各类阈值） */
   app.get('/api/config/settings', async () => prisma.settingItem.findMany({ orderBy: { key: 'asc' } }));
 
-  app.put<{ Params: { key: string }; Body: { value: any } }>('/api/config/settings/:key', async (req) => {
+  app.put<{ Params: { key: string }; Body: { value: any } }>('/api/config/settings/:key',
+    { preHandler: requirePerm('config:write') },
+    async (req) => {
     const value = typeof req.body.value === 'string' ? req.body.value : JSON.stringify(req.body.value);
+    await audit(req, 'CONFIG_CHANGE', { targetType: 'Setting', detail: req.params.key });
     return prisma.settingItem.upsert({
       where: { key: req.params.key },
       update: { value },
@@ -124,8 +132,9 @@ export default async function configRoutes(app: FastifyInstance) {
     }
   );
 
-  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/devices/:id', async (req) =>
-    prisma.device.update({ where: { id: Number(req.params.id) }, data: req.body })
+  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/devices/:id',
+    { preHandler: requirePerm('config:write') },
+    async (req) => prisma.device.update({ where: { id: Number(req.params.id) }, data: req.body })
   );
 
   /** 房间固定资产 */
@@ -139,7 +148,8 @@ export default async function configRoutes(app: FastifyInstance) {
     });
   });
 
-  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/assets/:id', async (req) =>
-    prisma.asset.update({ where: { id: Number(req.params.id) }, data: req.body })
+  app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/assets/:id',
+    { preHandler: requirePerm('space:room') },
+    async (req) => prisma.asset.update({ where: { id: Number(req.params.id) }, data: req.body })
   );
 }
