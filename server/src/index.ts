@@ -11,6 +11,7 @@ import configRoutes from './routes/config.js';
 import operationRoutes from './routes/operations.js';
 import integrationRoutes from './routes/integrations.js';
 import selfRoutes from './routes/self.js';
+import importRoutes from './routes/imports.js';
 
 const app = Fastify({ logger: { transport: undefined, level: 'warn' } });
 
@@ -50,6 +51,7 @@ await app.register(reportRoutes);
 await app.register(operationRoutes);
 await app.register(integrationRoutes);
 await app.register(selfRoutes);
+await app.register(importRoutes);
 
 // 用独立的 API_PORT，避免被外部工具注入的 PORT 抢占前端端口
 const port = Number(process.env.API_PORT ?? 3101);

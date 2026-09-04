@@ -4,7 +4,7 @@ import {
   DashboardOutlined, ApartmentOutlined, TeamOutlined, HeartOutlined,
   FileTextOutlined, WarningOutlined, SettingOutlined, ToolOutlined,
   SafetyCertificateOutlined, UserSwitchOutlined, AuditOutlined, FireOutlined,
-  ApiOutlined, UserOutlined, LogoutOutlined, KeyOutlined,
+  ApiOutlined, UserOutlined, LogoutOutlined, KeyOutlined, ImportOutlined,
 } from '@ant-design/icons';
 import { Routes, Route, useNavigate, useLocation, Navigate } from 'react-router-dom';
 import { api } from './api';
@@ -26,6 +26,7 @@ import Roster from './pages/Roster';
 import Evacuation from './pages/Evacuation';
 import Alerts from './pages/Alerts';
 import Integrations from './pages/Integrations';
+import ImportData from './pages/ImportData';
 import Settings from './pages/Settings';
 
 const { Header, Sider, Content } = Layout;
@@ -91,6 +92,7 @@ export default function App() {
     },
     {
       label: t('grp_system'), items: [
+        { key: '/import', icon: <ImportOutlined />, label: '批量导入', perm: 'person:read' },
         { key: '/integrations', icon: <ApiOutlined />, label: '集成对接', perm: 'config:read' },
         { key: '/settings', icon: <SettingOutlined />, label: t('nav_settings'), perm: 'config:read' },
       ],
@@ -183,6 +185,7 @@ export default function App() {
               <Route path="/roster" element={<Roster />} />
               <Route path="/evacuation" element={<Evacuation />} />
               <Route path="/alerts" element={<Alerts />} />
+              <Route path="/import" element={<ImportData />} />
               <Route path="/integrations" element={<Integrations />} />
               <Route path="/settings" element={<Settings />} />
             </Routes>

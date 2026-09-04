@@ -17,6 +17,7 @@
 import { PrismaClient } from '@prisma/client';
 import { DEFAULT_RULES } from '../src/services/rules.js';
 import { seedPlatform } from './seed-platform.js';
+import { bedLayoutFor } from '../src/services/space.js';
 
 const prisma = new PrismaClient();
 
@@ -120,33 +121,8 @@ const FLOOR_FUNCTION_ROOMS: Array<{ type: string; onFloor?: 'FIRST' | 'ALL'; onl
   { type: 'ACTIVITY', onFloor: 'FIRST' },
 ];
 
-/** 物理床位布局：按房型「标称规格」摆床，核定人数少于标称时多余的床标记为撤除 */
-function bedLayout(nominal: number, typeCode: string): Array<{ label: string; position: string }> {
-  if (typeCode === 'COUPLE') {
-    return [
-      { label: '双人床 · 铺位1', position: 'DOUBLE' },
-      { label: '双人床 · 铺位2', position: 'DOUBLE' },
-    ];
-  }
-  if (typeCode === 'FAMILY') {
-    return [
-      { label: '双人床 · 铺位1', position: 'DOUBLE' },
-      { label: '双人床 · 铺位2', position: 'DOUBLE' },
-      { label: '儿童床 1', position: 'SINGLE' },
-      { label: '儿童床 2', position: 'SINGLE' },
-    ];
-  }
-  if (nominal <= 3) {
-    return Array.from({ length: nominal }, (_, i) => ({ label: `${i + 1} 号床`, position: 'SINGLE' }));
-  }
-  const bunks = nominal / 2;
-  const out: Array<{ label: string; position: string }> = [];
-  for (let i = 1; i <= bunks; i++) {
-    out.push({ label: `${i} 下铺`, position: 'LOWER' });
-    out.push({ label: `${i} 上铺`, position: 'UPPER' });
-  }
-  return out;
-}
+/** 摆床规格与批量导入共用同一份实现，见 services/space.ts */
+const bedLayout = bedLayoutFor;
 
 // ================================================================ main
 async function main() {

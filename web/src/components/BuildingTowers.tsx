@@ -29,7 +29,7 @@ function rateColor(rate: number) {
   return '#f0f0f0';
 }
 
-export default function BuildingTowers() {
+export default function BuildingTowers({ embedded = false }: { embedded?: boolean } = {}) {
   const t = useT();
   const meta = useMeta();
   const nav = useNavigate();
@@ -38,8 +38,8 @@ export default function BuildingTowers() {
 
   useEffect(() => { api.tree().then(setTree); }, []);
 
-  if (!tree) return <Card size="small" title="楼栋剖面"><Spin /></Card>;
-  if (tree.length === 0) return <Card size="small" title="楼栋剖面"><Empty /></Card>;
+  if (!tree) return embedded ? <Spin /> : <Card size="small" title="楼栋剖面"><Spin /></Card>;
+  if (tree.length === 0) return embedded ? <Empty /> : <Card size="small" title="楼栋剖面"><Empty /></Card>;
 
   const floorUsage = (f: any) => {
     const used = f.stats.occupied + f.stats.held;
@@ -50,21 +50,20 @@ export default function BuildingTowers() {
   const natColor = (id: string | null) =>
     id ? (meta.nationalities.find((n: any) => n.id === id)?.color ?? '#d9d9d9') : '#f0f0f0';
 
-  return (
-    <Card
-      size="small"
-      title="楼栋剖面 · 每层住了多少人"
-      extra={
-        <Segmented
-          size="small" value={mode} onChange={(v) => setMode(v as Mode)}
-          options={[
-            { label: t('occupancyRate'), value: 'rate' },
-            { label: t('nationality'), value: 'nationality' },
-            { label: t('roomType'), value: 'roomType' },
-          ]}
-        />
-      }
-    >
+  const body = (
+    <>
+      {embedded && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }}>
+          <Segmented
+            size="small" value={mode} onChange={(v) => setMode(v as Mode)}
+            options={[
+              { label: t('occupancyRate'), value: 'rate' },
+              { label: t('nationality'), value: 'nationality' },
+              { label: t('roomType'), value: 'roomType' },
+            ]}
+          />
+        </div>
+      )}
       <div className="towers">
         {tree.map((b) => {
           const bUsed = b.stats.occupied + b.stats.held;
@@ -169,6 +168,26 @@ export default function BuildingTowers() {
       <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>
         楼层从下往上排，跟真实楼一致。鼠标悬停看该层明细，点击直接跳到床位图。
       </Typography.Text>
+    </>
+  );
+
+  if (embedded) return body;
+  return (
+    <Card
+      size="small"
+      title="楼栋剖面 · 每层住了多少人"
+      extra={
+        <Segmented
+          size="small" value={mode} onChange={(v) => setMode(v as Mode)}
+          options={[
+            { label: t('occupancyRate'), value: 'rate' },
+            { label: t('nationality'), value: 'nationality' },
+            { label: t('roomType'), value: 'roomType' },
+          ]}
+        />
+      }
+    >
+      {body}
     </Card>
   );
 }

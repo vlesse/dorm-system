@@ -219,3 +219,35 @@ export async function nextCode(prefix: string, model: 'workOrder' | 'violation' 
   const count = await (prisma as any)[model].count({ where: { code: { startsWith: head } } });
   return `${head}-${String(count + 1).padStart(4, '0')}`;
 }
+
+/**
+ * 按房型「标称规格」摆床。
+ * seed 生成和批量导入共用这一份，免得两边规格漂移。
+ * 超出核定人数的床由调用方标记为 DISABLED（降标撤除）。
+ */
+export function bedLayoutFor(nominal: number, typeCode: string): Array<{ label: string; position: string }> {
+  if (typeCode === 'COUPLE') {
+    return [
+      { label: '双人床 · 铺位1', position: 'DOUBLE' },
+      { label: '双人床 · 铺位2', position: 'DOUBLE' },
+    ];
+  }
+  if (typeCode === 'FAMILY') {
+    return [
+      { label: '双人床 · 铺位1', position: 'DOUBLE' },
+      { label: '双人床 · 铺位2', position: 'DOUBLE' },
+      { label: '儿童床 1', position: 'SINGLE' },
+      { label: '儿童床 2', position: 'SINGLE' },
+    ];
+  }
+  if (nominal <= 3) {
+    return Array.from({ length: Math.max(nominal, 1) }, (_, i) => ({ label: `${i + 1} 号床`, position: 'SINGLE' }));
+  }
+  const out: Array<{ label: string; position: string }> = [];
+  for (let i = 1; i <= Math.floor(nominal / 2); i++) {
+    out.push({ label: `${i} 下铺`, position: 'LOWER' });
+    out.push({ label: `${i} 上铺`, position: 'UPPER' });
+  }
+  if (nominal % 2 === 1) out.push({ label: `${Math.ceil(nominal / 2)} 号床`, position: 'SINGLE' });
+  return out;
+}

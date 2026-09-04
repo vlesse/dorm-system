@@ -115,3 +115,80 @@ body {
 }
 .tower-code { font-size: 15px; font-weight: 700; }
 .tower-meta { font-size: 11px; color: #262626; line-height: 1.5; font-variant-numeric: tabular-nums; }
+
+/* ---------- 楼层平面图 ---------- */
+.plan-wrap { display: flex; gap: 14px; align-items: flex-start; }
+.plan-side { flex: 0 0 168px; }
+.plan-floors { display: flex; flex-direction: column; gap: 3px; }
+.plan-floor-btn {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 8px; border-radius: 6px; cursor: pointer;
+  font-size: 12px; border: 1px solid transparent; background: #fafafa;
+}
+.plan-floor-btn:hover { background: #f0f0f0; }
+.plan-floor-btn.active { background: #e6f4ff; border-color: #91caff; }
+.plan-floor-btn b { width: 26px; }
+.plan-floor-num { margin-left: auto; color: #8c8c8c; font-variant-numeric: tabular-nums; }
+
+.plan-body { flex: 1 1 0; min-width: 0; }
+.plan-canvas {
+  border: 2px solid #d9d9d9;
+  border-radius: 6px;
+  padding: 10px;
+  background: #fff;
+  overflow-x: auto;
+}
+.plan-row { display: flex; gap: 6px; min-width: min-content; }
+
+.plan-room {
+  flex: 1 1 96px;
+  min-width: 88px;
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  padding: 5px 6px 6px;
+  cursor: pointer;
+  transition: box-shadow .12s;
+}
+.plan-room:hover { box-shadow: 0 0 0 2px #1677ff inset; }
+.plan-room.is-out { border-style: dashed; }
+.plan-room.is-func { background: #fafafa; border-style: dashed; cursor: default; flex: 0 0 96px; }
+.plan-room.is-func:hover { box-shadow: none; }
+.plan-room-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  font-size: 12px; color: #262626;
+}
+.plan-room-head span { font-size: 11px; color: #595959; font-variant-numeric: tabular-nums; }
+.plan-room-type { font-size: 10px; margin: 2px 0 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plan-func-name { font-size: 11px; color: #8c8c8c; margin-top: 4px; }
+.plan-flag {
+  display: inline-block; margin-left: 3px; padding: 0 3px;
+  background: #fa8c16; color: #fff; border-radius: 2px; font-size: 9px; line-height: 13px;
+}
+.plan-flag.danger { background: #ff4d4f; }
+.plan-beds { display: flex; flex-wrap: wrap; gap: 2px; }
+.plan-beds > i {
+  width: 10px; height: 10px; border-radius: 2px;
+  border: 1px solid rgba(0,0,0,.12); display: block;
+}
+
+/* 走廊 */
+.plan-corridor {
+  display: flex; align-items: center; justify-content: space-between;
+  background: repeating-linear-gradient(90deg, #f5f5f5, #f5f5f5 10px, #eee 10px, #eee 20px);
+  border-top: 1px solid #d9d9d9; border-bottom: 1px solid #d9d9d9;
+  margin: 6px 0; padding: 5px 10px;
+  font-size: 11px; color: #8c8c8c; letter-spacing: 2px;
+  min-width: min-content;
+}
+.plan-stair {
+  background: #595959; color: #fff; border-radius: 3px;
+  padding: 1px 7px; letter-spacing: 0; font-size: 10px; white-space: nowrap;
+}
+.plan-corridor-label { flex: 1; text-align: center; white-space: nowrap; }
+
+.plan-func-row {
+  display: flex; gap: 6px; align-items: center;
+  margin-top: 8px; padding-top: 8px; border-top: 1px dashed #e8e8e8;
+  min-width: min-content;
+}
+.plan-func-label { font-size: 11px; color: #bfbfbf; flex: 0 0 auto; writing-mode: vertical-rl; letter-spacing: 2px; }

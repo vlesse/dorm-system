@@ -149,6 +149,12 @@ export const api = {
   updateNotificationTemplate: (id: number, b: any) => put(`/notification-templates/${id}`, b),
   syncLogs: () => req<any[]>('/sync-logs'),
   syncPersons: (rows: any[], provider = 'EXCEL') => post('/sync/persons', { rows, provider }),
+
+  // 人工批量导入
+  importSchema: () => req<any>('/import/schema'),
+  importPreview: (type: string, rows: any[]) => post(`/import/${type}/preview`, { rows }),
+  importCommit: (type: string, rows: any[], onlyValid = true) =>
+    post(`/import/${type}/commit`, { rows, onlyValid }),
   updateDict: (name: string, id: string | number, b: any) => put(`/config/${name}/${id}`, b),
   createDict: (name: string, b: any) => post(`/config/${name}`, b),
 };
