@@ -4,4 +4,6 @@ dist/
 *.db
 *.db-journal
 server/prisma/*.db*
+*.tsbuildinfo
 .DS_Store
+DEPLOY.local.md

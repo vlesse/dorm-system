@@ -66,7 +66,7 @@ export default function Login() {
 
           {error && <Alert type="error" showIcon message={error} style={{ marginBottom: 12 }} />}
 
-          <Form layout="vertical" onFinish={onFinish} initialValues={{ username: 'admin' }}>
+          <Form layout="vertical" onFinish={onFinish} initialValues={{ username: 'admin', password: 'dorm@2026' }}>
             <Form.Item name="username" label="账号" rules={[{ required: true, message: '请输入账号' }]}>
               <Input prefix={<UserOutlined />} placeholder="username" autoComplete="username" />
             </Form.Item>
@@ -94,14 +94,14 @@ export default function Login() {
 
           <Alert
             type="info" style={{ marginTop: 16 }}
-            message={<span style={{ fontSize: 12 }}>演示账号</span>}
+            message={<span style={{ fontSize: 12 }}>演示账号 · 密码统一 <code>dorm@2026</code></span>}
             description={
               <div style={{ fontSize: 12, lineHeight: 1.9 }}>
-                <code>admin</code> 系统管理员（密码单独设置，见部署说明）<br />
+                <code>admin</code> 系统管理员（全部权限）<br />
                 <code>dorm.chief</code> 宿舍主管（看全部楼栋）<br />
-                <code>warden.a</code> A 栋宿管（<b>只看得到 A 栋</b>）<br />
+                <code>warden.a</code> A 栋宿管（<b>只看得到 A 栋</b>，用来对比数据范围）<br />
                 <code>hr01</code> 人力资源 · <code>ehs01</code> 安全环保<br />
-                除 admin 外初始密码 <code>dorm@2026</code>，首次登录强制改密
+                <span style={{ color: '#8c8c8c' }}>这是公开演示环境，数据全部为模拟生成。</span>
               </div>
             }
           />

@@ -25,7 +25,8 @@ export async function seedPlatform(prisma: PrismaClient, buildingIds: Record<str
   }
 
   // ---------------------------------------------------------------- 账号密码
-  // 演示用初始密码，全部标记为「首次登录必须改密」
+  // 这是演示 / 参考项目，账号密码统一且不强制改密，方便直接点开就看。
+  // ⚠ 真实投用前必须改掉：Settings → 账号与权限，或直接改这里重新 seed。
   const DEMO_PASSWORD = 'dorm@2026';
   const users = await prisma.user.findMany();
   for (const u of users) {
@@ -33,7 +34,7 @@ export async function seedPlatform(prisma: PrismaClient, buildingIds: Record<str
       where: { id: u.id },
       data: {
         passwordHash: hashPassword(DEMO_PASSWORD),
-        mustChangePassword: u.username !== 'admin',
+        mustChangePassword: false,
         locale: u.username.startsWith('warden.c') || u.username.startsWith('warden.d') ? 'id' : 'zh',
       },
     });
@@ -343,7 +344,7 @@ export async function seedPlatform(prisma: PrismaClient, buildingIds: Record<str
   });
 
   const uCount = await prisma.user.count();
-  console.log(`  账号 ${uCount} 个（初始密码 ${DEMO_PASSWORD}，除 admin 外首登强制改密）`);
+  console.log(`  账号 ${uCount} 个（密码统一 ${DEMO_PASSWORD}，演示用，投产前务必修改）`);
   const [iCount, tCount] = await Promise.all([prisma.integration.count(), prisma.notificationTemplate.count()]);
   console.log(`  集成平台占位 ${iCount} 个（企微/钉钉/飞书/Teams/泛微/致远/用友HR/OA/海康/大华/LDAP/短信/邮件/WhatsApp/Webhook），均未配置`);
   console.log(`  通知模板 ${tCount} 个（三语）`);
