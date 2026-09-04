@@ -894,3 +894,23 @@ model AuditLog {
   @@index([createdAt])
   @@index([action])
 }
+
+/// 员工自助端的一次性验证码。
+/// 员工不发账号密码 —— 工号 + 手机验证码，或企业平台扫码（IdentityBinding）。
+model OtpCode {
+  id        Int       @id @default(autoincrement())
+  /// 接收方：手机号；用工号登录时也记下来便于排查
+  target    String
+  employeeNo String?
+  code      String
+  /// SELF_LOGIN 自助端登录 / BIND 绑定外部身份
+  purpose   String    @default("SELF_LOGIN")
+  personId  Int?
+  attempts  Int       @default(0)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([target, purpose])
+  @@index([expiresAt])
+}

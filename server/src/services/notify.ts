@@ -14,7 +14,7 @@ import { prisma } from '../db.js';
  * 而且以后换平台不该动业务代码。
  */
 
-export type Channel = 'IN_APP' | 'WECOM' | 'DINGTALK' | 'WHATSAPP' | 'SMS' | 'EMAIL';
+export type Channel = 'IN_APP' | 'WECOM' | 'DINGTALK' | 'LARK' | 'WHATSAPP' | 'SMS' | 'EMAIL' | 'WEBHOOK';
 
 export interface OutboundMessage {
   channel: Channel;
@@ -67,6 +67,22 @@ const ADAPTERS: Record<string, ChannelAdapter> = {
       throw new Error('WhatsApp 适配器尚未启用：请先在「设置 → 集成对接」填入 phoneNumberId / accessToken');
     },
   },
+  LARK: {
+    channel: 'LARK',
+    isReady: (c) => !!(c.appId && c.appSecret),
+    async send() {
+      // 飞书应用消息：POST /open-apis/im/v1/messages，toAddress = open_id
+      throw new Error('飞书适配器尚未启用：请先在「设置 → 集成对接」填入 App ID / App Secret');
+    },
+  },
+  WEBHOOK: {
+    channel: 'WEBHOOK',
+    isReady: (c) => !!c.url,
+    async send() {
+      // 通用出站：POST JSON 到自定义地址，可对接任何自研 / 第三方系统
+      throw new Error('Webhook 适配器尚未启用：请先在「设置 → 集成对接」填入地址');
+    },
+  },
   SMS: {
     channel: 'SMS',
     isReady: (c) => !!(c.endpoint && c.apiKey),
@@ -84,7 +100,8 @@ const ADAPTERS: Record<string, ChannelAdapter> = {
 };
 
 const PROVIDER_BY_CHANNEL: Record<string, string> = {
-  WECOM: 'WECOM', DINGTALK: 'DINGTALK', WHATSAPP: 'WHATSAPP', SMS: 'SMS', EMAIL: 'SMTP',
+  WECOM: 'WECOM', DINGTALK: 'DINGTALK', LARK: 'LARK', WHATSAPP: 'WHATSAPP',
+  SMS: 'SMS', EMAIL: 'SMTP', WEBHOOK: 'WEBHOOK',
 };
 
 function render(tpl: string, vars: Record<string, any>) {

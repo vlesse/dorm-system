@@ -52,6 +52,45 @@ export const PROVIDER_FIELDS: Record<string, Array<{ key: string; label: string;
     { key: 'appSecret', label: 'AppSecret', secret: true },
     { key: 'personEndpoint', label: '花名册接口路径', hint: '用于人员同步' },
   ],
+  LARK: [
+    { key: 'appId', label: 'App ID' },
+    { key: 'appSecret', label: 'App Secret', secret: true },
+  ],
+  WEAVER_ECOLOGY: [
+    { key: 'baseUrl', label: 'e-cology 地址', hint: 'http://oa.company.com' },
+    { key: 'appId', label: '注册应用 appid' },
+    { key: 'aesKey', label: '应用 SecretKey', secret: true },
+    { key: 'syncUser', label: '同步接口账号' },
+    { key: 'workflowId', label: '审批流程 ID', hint: '做审批流对接才需要' },
+  ],
+  SEEYON: [
+    { key: 'baseUrl', label: '致远 A8 地址' },
+    { key: 'appKey', label: 'AppKey' },
+    { key: 'appSecret', label: 'AppSecret', secret: true },
+  ],
+  HIKVISION: [
+    { key: 'baseUrl', label: '综合安防平台地址', hint: 'https://ip:443（iSecure Center / HikCentral）' },
+    { key: 'appKey', label: 'AppKey（合作方 Key）' },
+    { key: 'appSecret', label: 'AppSecret', secret: true },
+    { key: 'streamProtocol', label: '取流协议', hint: 'hls / rtsp / ws-flv，二期视频接入用' },
+    { key: 'gatewayUrl', label: '视频网关地址', hint: 'go2rtc / MediaMTX，主应用不碰码流' },
+  ],
+  DAHUA: [
+    { key: 'baseUrl', label: 'DSS 平台地址' },
+    { key: 'clientId', label: 'Client ID' },
+    { key: 'clientSecret', label: 'Client Secret', secret: true },
+    { key: 'gatewayUrl', label: '视频网关地址', hint: 'go2rtc / MediaMTX' },
+  ],
+  YONYOU_HR: [
+    { key: 'baseUrl', label: '用友 / 金蝶 接口地址' },
+    { key: 'appKey', label: 'AppKey' },
+    { key: 'appSecret', label: 'AppSecret', secret: true },
+    { key: 'orgCode', label: '组织编码', hint: '只同步某个组织时填' },
+  ],
+  WEBHOOK: [
+    { key: 'url', label: 'Webhook 地址', hint: '通用出站，POST JSON' },
+    { key: 'secret', label: '签名密钥', secret: true },
+  ],
   SMTP: [
     { key: 'host', label: 'SMTP 主机' },
     { key: 'port', label: '端口' },

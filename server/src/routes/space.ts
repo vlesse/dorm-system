@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { prisma } from '../db.js';
 import { ROOM_INCLUDE, serializeRoom } from '../services/space.js';
 import { buildingScope, requirePerm, actor, audit } from '../services/auth.js';
+import QRCode from 'qrcode';
 
 const LIVE = ['ACTIVE', 'HELD', 'RESERVED'];
 
@@ -235,6 +236,64 @@ export default async function spaceRoutes(app: FastifyInstance) {
       occupants: r.beds.reduce((s, b) => s + b.occupancies.length, 0),
       usableBeds: r.beds.filter((b) => !['DISABLED', 'MAINTENANCE', 'LOCKED'].includes(b.status)).length,
       status: r.status,
+    }));
+  });
+
+  /**
+   * 房门二维码。贴在门上，员工扫了直接进自助端的该房间页面，一键报修。
+   * selfBaseUrl 从设置里取（园区内网地址），没配就用请求来源。
+   */
+  app.get<{ Params: { id: string }; Querystring: { format?: string } }>(
+    '/api/space/rooms/:id/qrcode',
+    async (req, reply) => {
+      const room = await prisma.room.findUnique({
+        where: { id: Number(req.params.id) },
+        include: { floor: { include: { building: true } }, roomType: true },
+      });
+      if (!room) return reply.code(404).send({ error: '房间不存在' });
+
+      const setting = await prisma.settingItem.findUnique({ where: { key: 'self.baseUrl' } });
+      let base = '';
+      try { base = JSON.parse(setting?.value ?? '""'); } catch { base = ''; }
+      // 没配就用请求来源（前端页面的 Origin），最后才退到 host —— 免得二维码指到 API 端口
+      if (!base) base = (req.headers.origin as string) ?? (req.headers.referer as string)?.replace(/\/[^/]*$/, '') ?? '';
+      if (!base) base = `http://${req.headers.host ?? 'localhost:5183'}`;
+      const url = `${base.replace(/\/$/, '')}/m/room/${encodeURIComponent(room.code)}`;
+
+      if (req.query.format === 'svg') {
+        const svg = await QRCode.toString(url, { type: 'svg', margin: 1, width: 240 });
+        reply.header('Content-Type', 'image/svg+xml; charset=utf-8');
+        return svg;
+      }
+      const dataUrl = await QRCode.toDataURL(url, { margin: 1, width: 320 });
+      return {
+        roomId: room.id, roomCode: room.code,
+        building: room.floor.building.code, floorLevel: room.floor.level,
+        roomType: room.roomType.nameZh,
+        url, dataUrl,
+      };
+    }
+  );
+
+  /** 整层楼的门牌二维码，批量打印用 */
+  app.get<{ Params: { id: string } }>('/api/space/floors/:id/qrcodes', async (req) => {
+    const rooms = await prisma.room.findMany({
+      where: { floorId: Number(req.params.id) },
+      include: { roomType: true, floor: { include: { building: true } } },
+      orderBy: { code: 'asc' },
+    });
+    const setting = await prisma.settingItem.findUnique({ where: { key: 'self.baseUrl' } });
+    let base = '';
+    try { base = JSON.parse(setting?.value ?? '""'); } catch { base = ''; }
+    if (!base) base = (req.headers.origin as string) ?? `http://${req.headers.host ?? 'localhost:5183'}`;
+    return Promise.all(rooms.map(async (r) => {
+      const url = `${base.replace(/\/$/, '')}/m/room/${encodeURIComponent(r.code)}`;
+      return {
+        roomId: r.id, roomCode: r.code, roomType: r.roomType.nameZh,
+        building: r.floor.building.code, floorLevel: r.floor.level,
+        isResidential: r.roomType.isResidential,
+        url, dataUrl: await QRCode.toDataURL(url, { margin: 1, width: 200 }),
+      };
     }));
   });
 }

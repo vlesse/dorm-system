@@ -33,6 +33,8 @@ export default function BedMap() {
   const [capModal, setCapModal] = useState<any>(null);
   const [capValue, setCapValue] = useState(0);
   const [capReason, setCapReason] = useState('');
+  const [qr, setQr] = useState<any>(null);
+  const [floorQrs, setFloorQrs] = useState<any[] | null>(null);
 
   useEffect(() => { api.tree().then(setTree); }, []);
 
@@ -146,6 +148,10 @@ export default function BedMap() {
             <Space>
               <Button size="small" type={showFunc ? 'default' : 'primary'} onClick={() => setShowFunc(!showFunc)}>
                 {showFunc ? '隐藏功能房' : '显示功能房'}
+              </Button>
+              <Button size="small" disabled={!floorId}
+                onClick={async () => setFloorQrs(await api.floorQrCodes(floorId!))}>
+                打印门牌
               </Button>
               <Segmented
                 size="small" value={colorBy} onChange={(v) => setColorBy(v as any)}
@@ -302,6 +308,9 @@ export default function BedMap() {
                   await api.extraBed({ roomId: roomDrawer.id, reason: '临时加床' });
                   message.success('已加床'); openRoom(roomDrawer.id); refresh();
                 }}>{t('extraBed')}</Button>
+              <Button size="small" onClick={async () => setQr(await api.roomQrCode(roomDrawer.id))}>
+                门牌二维码
+              </Button>
               <Select size="small" style={{ width: 130 }} value={roomDrawer.status}
                 onChange={async (v) => {
                   try {
@@ -490,6 +499,45 @@ export default function BedMap() {
               value={capReason} onChange={(e) => setCapReason(e.target.value)} />
           </Space>
         )}
+      </Modal>
+
+      {/* 单间门牌二维码 */}
+      <Modal
+        open={!!qr} title={qr ? `${qr.roomCode} 门牌二维码` : ''} onCancel={() => setQr(null)}
+        footer={<Button type="primary" onClick={() => window.print()}>打印</Button>}
+      >
+        {qr && (
+          <div style={{ textAlign: 'center' }}>
+            <Alert type="info" showIcon style={{ marginBottom: 12, textAlign: 'left' }}
+              message="贴在房门上，员工扫码直接进自助端"
+              description="扫码后看到房间信息并可一键报修。二维码里的地址取自「设置 → 阈值 → 自助端基址」，上线前记得填成园区内网地址。" />
+            <img src={qr.dataUrl} alt={qr.roomCode} style={{ width: 240, height: 240 }} />
+            <div style={{ fontSize: 22, fontWeight: 700, marginTop: 8 }}>{qr.roomCode}</div>
+            <div style={{ color: '#8c8c8c', fontSize: 12 }}>
+              {qr.building}栋 {qr.floorLevel}层 · {qr.roomType}
+            </div>
+            <div style={{ color: '#bfbfbf', fontSize: 11, marginTop: 8, wordBreak: 'break-all' }}>{qr.url}</div>
+          </div>
+        )}
+      </Modal>
+
+      {/* 整层批量打印 */}
+      <Modal
+        open={!!floorQrs} width={860} onCancel={() => setFloorQrs(null)}
+        title={`${building?.code}栋 ${floor?.name} · 门牌二维码`}
+        footer={<Button type="primary" onClick={() => window.print()}>打印本页</Button>}
+      >
+        <Row gutter={[12, 12]}>
+          {(floorQrs ?? []).filter((q: any) => q.isResidential).map((q: any) => (
+            <Col key={q.roomId} span={6} style={{ textAlign: 'center' }}>
+              <div style={{ border: '1px solid #eee', borderRadius: 8, padding: 8 }}>
+                <img src={q.dataUrl} alt={q.roomCode} style={{ width: '100%' }} />
+                <div style={{ fontWeight: 700 }}>{q.roomCode}</div>
+                <div style={{ fontSize: 11, color: '#8c8c8c' }}>{q.roomType}</div>
+              </div>
+            </Col>
+          ))}
+        </Row>
       </Modal>
 
       <AssignDrawer

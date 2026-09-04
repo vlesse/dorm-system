@@ -60,6 +60,8 @@ export const api = {
   setRoomCapacity: (id: number, b: { capacity: number; deratedReason?: string | null }) =>
     put(`/space/rooms/${id}/capacity`, b),
   setBedStatus: (id: number, b: { status: string; note?: string }) => put(`/beds/${id}/status`, b),
+  roomQrCode: (id: number) => req<any>(`/space/rooms/${id}/qrcode`),
+  floorQrCodes: (id: number) => req<any[]>(`/space/floors/${id}/qrcodes`),
 
   // 人员
   persons: (q: Record<string, any>) => req<any>(`/persons${qs(q)}`),

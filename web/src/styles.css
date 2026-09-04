@@ -1,5 +1,7 @@
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
+/* antd 的 App 包裹层默认没有高度，会让整屏布局塌掉 */
+.ant-app { height: 100%; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC',
     'Helvetica Neue', Arial, sans-serif;

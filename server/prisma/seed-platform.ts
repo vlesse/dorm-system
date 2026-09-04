@@ -66,28 +66,63 @@ export async function seedPlatform(prisma: PrismaClient, buildingIds: Record<str
         note: '印尼籍员工的主要触达渠道 —— 他们不用企业微信/钉钉。会话窗口外只能发已审核模板消息。',
       },
       {
+        provider: 'LARK', nameZh: '飞书 / Lark', nameEn: 'Lark', nameId: 'Lark',
+        capabilities: 'SSO,SYNC,NOTIFY,APPROVAL', sortOrder: 3,
+        note: '与企业微信 / 钉钉同类，看总部用哪个。',
+      },
+      {
+        provider: 'WEAVER_ECOLOGY', nameZh: '泛微 e-cology', nameEn: 'Weaver e-cology', nameId: 'Weaver e-cology',
+        capabilities: 'SYNC,APPROVAL', sortOrder: 6,
+        note: '国内中大型企业常见的 OA。可做花名册同步和调宿 / 夫妻房审批流对接。',
+      },
+      {
+        provider: 'SEEYON', nameZh: '致远 A8 OA', nameEn: 'Seeyon A8', nameId: 'Seeyon A8',
+        capabilities: 'SYNC,APPROVAL', sortOrder: 7,
+        note: '与泛微同类，二选一。',
+      },
+      {
+        provider: 'YONYOU_HR', nameZh: '用友 / 金蝶 HR', nameEn: 'Yonyou / Kingdee HR', nameId: 'Yonyou / Kingdee HR',
+        capabilities: 'SYNC', sortOrder: 8,
+        note: '花名册在 HR 系统而不在 OA 里时走这个。离职状态同步过来自动触发退宿。',
+      },
+      {
+        provider: 'HIKVISION', nameZh: '海康威视 综合安防平台', nameEn: 'Hikvision iSecure / HikCentral', nameId: 'Hikvision iSecure',
+        capabilities: 'VIDEO,ACCESS,SYNC', sortOrder: 9,
+        note: '楼道监控与门禁。视频码流交独立网关，主应用只管「哪层楼有哪些摄像头」和权限。',
+      },
+      {
+        provider: 'DAHUA', nameZh: '大华 DSS 平台', nameEn: 'Dahua DSS', nameId: 'Dahua DSS',
+        capabilities: 'VIDEO,ACCESS', sortOrder: 10,
+        note: '与海康同类，园区用哪家就配哪家。',
+      },
+      {
+        provider: 'WEBHOOK', nameZh: '通用 Webhook', nameEn: 'Generic Webhook', nameId: 'Webhook Umum',
+        capabilities: 'NOTIFY', sortOrder: 13,
+        note: '兜底：任何自研 / 第三方系统，POST JSON 即可接收本系统的事件。',
+      },
+      {
         provider: 'AZURE_AD', nameZh: 'Microsoft Teams / Entra ID', nameEn: 'Microsoft Teams / Entra ID', nameId: 'Microsoft Teams / Entra ID',
-        capabilities: 'SSO,SYNC,NOTIFY', sortOrder: 4,
+        capabilities: 'SSO,SYNC,NOTIFY', sortOrder: 5,
         note: '有欧美合资方 / 用 M365 时才需要，通常只覆盖办公室人员。',
       },
       {
         provider: 'OA_HTTP', nameZh: '公司 OA / HR 接口', nameEn: 'Corporate OA / HR API', nameId: 'API OA / HR',
-        capabilities: 'SYNC,APPROVAL', sortOrder: 5,
+        capabilities: 'SYNC,APPROVAL', sortOrder: 4,
         note: '花名册的唯一来源。接上之后「离职未退宿」才能真正根治。',
       },
       {
         provider: 'LDAP', nameZh: 'LDAP / AD 域', nameEn: 'LDAP / Active Directory', nameId: 'LDAP / Active Directory',
-        capabilities: 'SSO,SYNC', sortOrder: 6,
+        capabilities: 'SSO,SYNC', sortOrder: 11,
         note: '园区内网已有域控时可用。',
       },
       {
         provider: 'SMS', nameZh: '短信网关', nameEn: 'SMS Gateway', nameId: 'Gerbang SMS',
-        capabilities: 'NOTIFY', sortOrder: 7,
+        capabilities: 'NOTIFY', sortOrder: 12,
         note: '兜底渠道：不装任何 App 的工人也能收到。',
       },
       {
         provider: 'SMTP', nameZh: '邮件 SMTP', nameEn: 'Email SMTP', nameId: 'Email SMTP',
-        capabilities: 'NOTIFY', sortOrder: 8,
+        capabilities: 'NOTIFY', sortOrder: 14,
         note: '给管理层发日报 / 周报用。',
       },
     ],
@@ -96,6 +131,20 @@ export async function seedPlatform(prisma: PrismaClient, buildingIds: Record<str
   // ---------------------------------------------------------------- 通知模板
   await prisma.notificationTemplate.createMany({
     data: [
+      {
+        code: 'SELF_OTP', nameZh: '自助端登录验证码',
+        titleZh: '宿舍系统登录验证码', bodyZh: '验证码 {code}，{minutes} 分钟内有效。请勿转发给他人。',
+        titleId: 'Kode verifikasi Sistem Asrama', bodyId: 'Kode {code}, berlaku {minutes} menit. Jangan bagikan.',
+        titleEn: 'Dormitory system login code', bodyEn: 'Code {code}, valid {minutes} minutes. Do not share.',
+        channels: 'SMS,WHATSAPP', audience: 'PERSON',
+      },
+      {
+        code: 'REQUEST_SUBMITTED', nameZh: '员工提交申请通知',
+        titleZh: '有新的住宿申请待审批', bodyZh: '{name} 提交了 {type} 申请（{code}）：{reason}',
+        titleId: 'Permohonan baru menunggu persetujuan', bodyId: '{name} mengajukan {type} ({code}): {reason}',
+        titleEn: 'New accommodation request', bodyEn: '{name} submitted a {type} request ({code}): {reason}',
+        channels: 'IN_APP,WECOM', audience: 'ROLE',
+      },
       {
         code: 'BED_ASSIGNED', nameZh: '床位分配通知',
         titleZh: '已为你安排住宿', bodyZh: '{name}，你的住宿已安排在 {room} {bed}，请携带证件到宿管室领取物品并办理入住。',
@@ -226,8 +275,76 @@ export async function seedPlatform(prisma: PrismaClient, buildingIds: Record<str
     },
   });
 
+
+  // ---------------------------------------------------------------- 自助端演示数据
+  // 挑几个在住员工，造几条「员工自己提的」工单和申请，让自助端一进去就有东西看
+  const selfDemoPersons = await prisma.person.findMany({
+    where: { employmentStatus: 'ACTIVE', occupancies: { some: { status: { in: ['ACTIVE', 'HELD'] } } } },
+    include: { occupancies: { where: { status: { in: ['ACTIVE', 'HELD'] } }, include: { bed: true } } },
+    take: 12,
+  });
+  const woCats = await prisma.workOrderCategory.findMany();
+  const selfWo: any[] = [];
+  const selfReq: any[] = [];
+  selfDemoPersons.forEach((p, i) => {
+    const cat = woCats[i % woCats.length];
+    selfWo.push({
+      code: `WOS${String(10001 + i).slice(1)}`,
+      categoryId: cat.id, priority: 'NORMAL',
+      title: ['房间空调不制冷', '卫生间下水慢', '床头灯不亮', '门锁卡涩', '热水器没热水'][i % 5],
+      description: '员工自助端提交',
+      scopeType: 'ROOM', scopeId: p.occupancies[0].bed.roomId,
+      reportedById: p.id, reporterName: p.name,
+      reportedAt: new Date(Date.now() - (i + 1) * 36e5 * 8),
+      status: ['NEW', 'ASSIGNED', 'IN_PROGRESS', 'DONE'][i % 4],
+      assignedTo: i % 4 === 0 ? null : '维修一组',
+    });
+    if (i < 5) {
+      selfReq.push({
+        code: `REQS${String(10001 + i).slice(1)}`,
+        type: ['TRANSFER', 'VISITOR_OVERNIGHT', 'EXTRA_BED', 'TRANSFER', 'CHECKOUT'][i],
+        personId: p.id,
+        reason: ['与室友作息冲突，申请调换房间', '家属周末来访，申请留宿两晚',
+          '同乡临时到岗，申请加床', '想调到有空调的房间', '合同到期，申请退宿'][i],
+        status: i < 3 ? 'PENDING' : 'APPROVED',
+        submittedBy: `${p.name}（自助端）`,
+        submittedAt: new Date(Date.now() - (i + 1) * 36e5 * 20),
+        approvedBy: i < 3 ? null : '宿舍主管',
+        approvedAt: i < 3 ? null : new Date(Date.now() - i * 36e5 * 5),
+      });
+    }
+  });
+  if (selfWo.length) await prisma.workOrder.createMany({ data: selfWo });
+  if (selfReq.length) await prisma.request.createMany({ data: selfReq });
+
+  // 给这几个人发几条站内通知，自助端「我的通知」才不是空的
+  const selfNotis: any[] = [];
+  for (const p of selfDemoPersons.slice(0, 8)) {
+    selfNotis.push({
+      templateCode: 'ANNOUNCEMENT', channel: 'IN_APP', toPersonId: p.id,
+      locale: p.nationalityId === 'CN' ? 'zh' : p.nationalityId === 'ID' ? 'id' : 'en',
+      title: p.nationalityId === 'ID' ? 'Air mati Sabtu ini' : '本周六停水检修',
+      body: p.nationalityId === 'ID'
+        ? 'Sabtu 09:00-15:00 air dimatikan untuk perbaikan pipa. Mohon siapkan air.'
+        : '本周六 09:00-15:00 停水进行管道检修，请提前储水。',
+      status: 'SENT', sentAt: new Date(Date.now() - 2 * 36e5), createdAt: new Date(Date.now() - 2 * 36e5),
+    });
+  }
+  if (selfNotis.length) await prisma.notification.createMany({ data: selfNotis });
+
+  console.log(`  自助端演示：工单 ${selfWo.length} 条、申请 ${selfReq.length} 条、通知 ${selfNotis.length} 条`);
+  console.log(`  自助端可用工号示例：${selfDemoPersons.slice(0, 3).map((p) => p.employeeNo).join(' / ')}`);
+
+  await prisma.settingItem.createMany({
+    data: [
+      { key: 'self.baseUrl', group: 'self', description: '员工自助端基址（房门二维码里用，填园区内网地址）', value: JSON.stringify('') },
+      { key: 'self.enabled', group: 'self', description: '是否开放员工自助端', value: 'true' },
+    ],
+  });
+
   const uCount = await prisma.user.count();
   console.log(`  账号 ${uCount} 个（初始密码 ${DEMO_PASSWORD}，除 admin 外首登强制改密）`);
-  console.log('  集成占位 8 个（企业微信 / 钉钉 / WhatsApp / Teams / OA / LDAP / 短信 / 邮件），均未配置');
-  console.log('  通知模板 11 个（三语）');
+  const [iCount, tCount] = await Promise.all([prisma.integration.count(), prisma.notificationTemplate.count()]);
+  console.log(`  集成平台占位 ${iCount} 个（企微/钉钉/飞书/Teams/泛微/致远/用友HR/OA/海康/大华/LDAP/短信/邮件/WhatsApp/Webhook），均未配置`);
+  console.log(`  通知模板 ${tCount} 个（三语）`);
 }

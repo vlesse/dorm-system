@@ -108,6 +108,9 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
 export function requirePerm(perm: string) {
   return async (req: FastifyRequest, reply: FastifyReply) => {
     if (!req.auth) return reply.code(401).send({ error: '未登录或登录已过期', code: 'UNAUTHENTICATED' });
+    if (req.auth.kind === 'PERSON') {
+      return reply.code(403).send({ error: '员工自助账号不能访问管理端', code: 'NOT_STAFF' });
+    }
     if (!hasPermission(req.auth.perms, perm)) {
       return reply.code(403).send({ error: `没有「${perm}」权限`, code: 'FORBIDDEN', needed: perm });
     }
@@ -181,4 +184,40 @@ export async function issueTokenForUser(userId: number) {
       locale: user.locale, mustChangePassword: user.mustChangePassword,
     },
   };
+}
+
+// ==================================================== 员工自助端
+/**
+ * 员工本人的 token。刻意和管理端账号分开：
+ *   kind = 'PERSON'，sub = personId，权限固定只有 'self'。
+ * 这样即使 token 泄漏也只能看自己那点数据，碰不到管理端接口。
+ */
+export async function issueTokenForPerson(personId: number) {
+  const { prisma: db } = await import('../db.js');
+  const person = await db.person.findUnique({ where: { id: personId } });
+  if (!person || person.employmentStatus === 'RESIGNED') return null;
+  return {
+    token: signToken({
+      sub: person.id, kind: 'PERSON',
+      username: person.employeeNo, name: person.name,
+      role: 'SELF', perms: ['self'], buildings: [],
+    }),
+    person: { id: person.id, employeeNo: person.employeeNo, name: person.name },
+  };
+}
+
+/** 只允许员工本人 token 访问 */
+export async function requireSelf(req: FastifyRequest, reply: FastifyReply) {
+  if (!req.auth) return reply.code(401).send({ error: '未登录或登录已过期', code: 'UNAUTHENTICATED' });
+  if (req.auth.kind !== 'PERSON') {
+    return reply.code(403).send({ error: '该接口只面向员工本人', code: 'NOT_SELF' });
+  }
+}
+
+/** 管理端接口不接受员工 token */
+export async function requireStaff(req: FastifyRequest, reply: FastifyReply) {
+  if (!req.auth) return reply.code(401).send({ error: '未登录或登录已过期', code: 'UNAUTHENTICATED' });
+  if (req.auth.kind !== 'USER') {
+    return reply.code(403).send({ error: '员工自助账号不能访问管理端', code: 'NOT_STAFF' });
+  }
 }
