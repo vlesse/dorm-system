@@ -36,6 +36,19 @@ export default async function spaceRoutes(app: FastifyInstance) {
       },
     });
 
+    /** 一层楼的房型构成 —— 总览的楼栋剖面图按这个画色带 */
+    const mixOf = (rooms: any[]) => {
+      const m = new Map<number, { code: string; name: string; color: string; rooms: number; beds: number; isResidential: boolean }>();
+      for (const r of rooms) {
+        const t = r.roomType;
+        const cur = m.get(t.id) ?? { code: t.code, name: t.nameZh, color: t.color, rooms: 0, beds: 0, isResidential: t.isResidential };
+        cur.rooms += 1;
+        cur.beds += r.beds.length;
+        m.set(t.id, cur);
+      }
+      return [...m.values()].sort((a, b) => b.rooms - a.rooms);
+    };
+
     return buildings.map((b) => {
       const allRooms = b.floors.flatMap((f) => f.rooms);
       const allBeds = allRooms.flatMap((r) => r.beds);
@@ -59,7 +72,9 @@ export default async function spaceRoutes(app: FastifyInstance) {
           genderPolicy: f.genderPolicy,
           roomCount: f.rooms.length,
           functionRoomCount: f.rooms.filter((r) => !r.roomType.isResidential).length,
+          deratedRoomCount: f.rooms.filter((r) => r.deratedReason).length,
           approvedCapacity: f.rooms.reduce((s, r) => s + r.capacity, 0),
+          roomTypeMix: mixOf(f.rooms),
           stats: countBeds(f.rooms.flatMap((r) => r.beds)),
         })),
       };

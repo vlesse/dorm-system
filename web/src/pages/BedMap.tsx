@@ -43,7 +43,10 @@ export default function BedMap() {
     const q = Number(sp.get('building'));
     const b = tree.find((x) => x.id === q) ?? tree[0];
     setBuildingId(b.id);
-    setFloorId(b.floors[0]?.id ?? null);
+    // 总览的楼栋剖面图可以直接点到某一层
+    const wantFloor = Number(sp.get('floor'));
+    const f = b.floors.find((x: any) => x.id === wantFloor);
+    setFloorId(f?.id ?? b.floors[0]?.id ?? null);
   }, [tree]);
 
   const loadFloor = (id: number) => {
@@ -81,7 +84,7 @@ export default function BedMap() {
   return (
     <Row gutter={12} style={{ height: '100%' }}>
       {/* 左：楼栋 + 楼层 */}
-      <Col flex="240px">
+      <Col flex="0 0 240px">
         <Card size="small" styles={{ body: { padding: 10 } }}>
           <Select
             style={{ width: '100%', marginBottom: 10 }}
@@ -131,8 +134,8 @@ export default function BedMap() {
         </Card>
       </Col>
 
-      {/* 右：床位图 */}
-      <Col flex="auto">
+      {/* 右：床位图。flex 基准必须是 0 且允许收缩，否则内容一宽就把整列挤到下一行 */}
+      <Col flex="1 1 0" style={{ minWidth: 0 }}>
         <Card
           size="small"
           title={

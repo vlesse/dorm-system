@@ -66,3 +66,52 @@ body {
   .ant-layout-sider, .ant-layout-header, .ant-btn, .ant-select { display: none !important; }
   .ant-layout-content { padding: 0 !important; overflow: visible !important; }
 }
+
+/* ---------- 楼栋剖面图 ---------- */
+.towers {
+  display: flex;
+  gap: 14px;
+  align-items: flex-end;
+  overflow-x: auto;
+  padding-bottom: 6px;
+}
+.tower { flex: 1 1 0; min-width: 92px; }
+.tower-floors { display: flex; flex-direction: column; }
+.tower-floor {
+  position: relative;
+  height: 30px;
+  border: 1px solid #fff;
+  border-radius: 3px;
+  margin-bottom: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 7px;
+  font-size: 11px;
+  color: #262626;
+  cursor: pointer;
+  overflow: hidden;
+  background: #f0f0f0;
+  transition: transform .1s, box-shadow .1s;
+}
+.tower-floor:hover { transform: translateX(2px); box-shadow: 0 0 0 2px #1677ff inset; }
+.tower-floor-no { font-weight: 600; position: relative; z-index: 2; }
+.tower-floor-num { color: #595959; position: relative; z-index: 2; font-variant-numeric: tabular-nums; }
+/* 入住率模式下贴底的实心条 */
+.tower-floor-bar {
+  position: absolute; left: 0; bottom: 0; height: 3px;
+  background: rgba(0, 0, 0, .38); z-index: 1;
+}
+/* 房型构成模式：整格铺成色带 */
+.tower-mix { position: absolute; inset: 0; display: flex; z-index: 0; }
+.tower-mix > i { display: block; height: 100%; }
+
+.tower-base {
+  margin-top: 6px;
+  text-align: center;
+  border-top: 3px solid #595959;
+  padding-top: 6px;
+  cursor: pointer;
+}
+.tower-code { font-size: 15px; font-weight: 700; }
+.tower-meta { font-size: 11px; color: #262626; line-height: 1.5; font-variant-numeric: tabular-nums; }

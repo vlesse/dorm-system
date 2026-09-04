@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { useT, useLang } from '../i18n';
 import { BED_STATUS_COLOR } from '../meta';
+import BuildingTowers from '../components/BuildingTowers';
 
 export default function Dashboard() {
   const t = useT();
@@ -98,6 +99,8 @@ export default function Dashboard() {
           </Card>
         </Col>
       </Row>
+
+      <BuildingTowers />
 
       <Card size="small" title={t('byBuilding')}>
         <div className="mini-bar" style={{ marginBottom: 14 }}>
