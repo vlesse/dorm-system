@@ -55,8 +55,11 @@ await app.register(importRoutes);
 
 // 用独立的 API_PORT，避免被外部工具注入的 PORT 抢占前端端口
 const port = Number(process.env.API_PORT ?? 3101);
+// 生产环境应绑 127.0.0.1，由前面的 nginx 反代并终结 TLS；
+// 开发时默认 0.0.0.0，方便手机连同一局域网调自助端
+const host = process.env.API_HOST ?? '0.0.0.0';
 try {
-  await app.listen({ port, host: '0.0.0.0' });
+  await app.listen({ port, host });
   console.log(`\n  宿舍管理系统 API  →  http://localhost:${port}/api/health\n`);
 } catch (e) {
   console.error(e);
