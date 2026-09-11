@@ -59,6 +59,7 @@ dorm-system/
 │           ├── operations.ts    工单、违规、访客、检查、物品、申请、公告
 │           ├── reports.ts       看板、告警、花名册、疏散清单
 │           ├── integrations.ts  集成、通知、同步日志
+│           ├── complaints.ts    投诉：受理 / 核实 / 认定 / 合并 / 揭示身份 / 附件
 │           ├── imports.ts       批量导入（模板 / 预检 / 写入）
 │           └── self.ts          员工自助端全部接口
 └── web/
@@ -154,6 +155,23 @@ if (scope) where.buildingId = { in: scope };
 
 **新写的任何列表 / 统计接口都要过一遍 `buildingScope`**，
 否则 A 栋宿管会看到全园区数据 —— 这是最容易漏的一类 bug。
+
+### 投诉的可见性
+
+投诉比别的模块多一层：除了楼栋范围，还有**派发路径**。统一走 `complaintScope(req)`：
+
+```ts
+import { complaintScope, canRevealIdentity, serializeComplaint } from '../services/complaints.js';
+
+const where = { AND: [complaintScope(req), /* 其它条件 */] };
+```
+
+两条铁律，碰投诉相关代码时别破坏：
+
+1. **`serializeComplaint()` 永远不返回匿名投诉的 `complainant`** —— 不看权限。
+   要身份只能走 `/identity`，那一次会写 `AuditLog`。
+   任何「反正他有权限，顺手带出来」的改法都会让匿名名存实亡。
+2. **不在范围内的投诉返回 `404` 而不是 `403`** —— `403` 等于承认「它存在」。
 
 ### 规则引擎
 

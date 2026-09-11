@@ -12,12 +12,15 @@ export async function seedPlatform(prisma: PrismaClient, buildingIds: Record<str
   // 权限点写成 `模块:动作`，`*` 全部，`模块:*` 模块内全部
   const rolePerms: Record<string, string> = {
     ADMIN: '*',
-    DORM_MANAGER: 'space:*,space:all,person:*,allocation:*,report:*,workorder:*,violation:*,inspection:*,visitor:*,request:*,item:*,config:write,config:read,user:read,audit:read',
+    DORM_MANAGER: 'space:*,space:all,person:*,allocation:*,report:*,workorder:*,violation:*,inspection:*,visitor:*,request:*,item:*,complaint:*,config:write,config:read,user:read,audit:read',
     // 楼栋宿管：没有 space:all，因此只能看到自己楼栋的数据
     // 楼栋宿管可以管房间/床位状态（报修、封床），但改不了国籍分区和核定人数 —— 那是主管的事
-    WARDEN: 'space:read,space:room,person:read,allocation:*,workorder:*,violation:create,violation:read,inspection:*,visitor:*,request:read,item:*,report:read',
-    HR: 'person:*,report:read,space:read,space:all,request:read,audit:read',
-    EHS: 'report:read,space:read,space:all,violation:*,inspection:*,workorder:read',
+    // 投诉上刻意只给 read+write：
+    //   没有 complaint:all → 看不到「投诉宿管本人」那类（走 MANAGER/HR），否则这条路走不通
+    //   没有 complaint:identity → 揭不开匿名投诉人的身份，员工才敢投诉本楼的事
+    WARDEN: 'space:read,space:room,person:read,allocation:*,workorder:*,violation:create,violation:read,inspection:*,visitor:*,request:read,item:*,complaint:read,complaint:write,report:read',
+    HR: 'person:*,report:read,space:read,space:all,request:read,complaint:read,complaint:all,complaint:identity,audit:read',
+    EHS: 'report:read,space:read,space:all,violation:*,inspection:*,workorder:read,complaint:*',
     VIEWER: 'report:read,space:read,space:all,person:read',
   };
   for (const [code, permissions] of Object.entries(rolePerms)) {
@@ -208,6 +211,32 @@ export async function seedPlatform(prisma: PrismaClient, buildingIds: Record<str
         titleId: 'Karyawan resign perlu check-out', bodyId: '{name} ({employeeNo}) sudah resign tapi masih di {room}.',
         titleEn: 'Resigned staff needs check-out', bodyEn: '{name} ({employeeNo}) resigned but still occupies {room}.',
         channels: 'IN_APP,WECOM', audience: 'ROLE',
+      },
+      {
+        code: 'COMPLAINT_SUBMITTED', nameZh: '新投诉待处理',
+        titleZh: '有新的投诉待处理',
+        // 通知里刻意不带投诉人姓名 —— 匿名与否都不带。
+        // 宿管常常会把通知截图转到工作群里，带了名字就等于当众公开投诉人。
+        bodyZh: '{code}（{type}）{location}，发生于 {when}。请在 {sla} 小时内受理并核实。',
+        titleId: 'Pengaduan baru', bodyId: '{code} ({type}) {location}, terjadi {when}. Tangani dalam {sla} jam.',
+        titleEn: 'New complaint', bodyEn: '{code} ({type}) {location}, occurred {when}. Handle within {sla} hours.',
+        channels: 'IN_APP,WECOM', audience: 'ROLE',
+      },
+      {
+        code: 'COMPLAINT_ACCEPTED', nameZh: '投诉已受理',
+        titleZh: '你的投诉已受理', bodyZh: '{code}（{type}）已受理，我们正在核实，有结果会通知你。',
+        titleId: 'Pengaduan diterima', bodyId: '{code} ({type}) sudah diterima dan sedang diperiksa.',
+        titleEn: 'Complaint received', bodyEn: '{code} ({type}) has been received and is being checked.',
+        channels: 'IN_APP,WHATSAPP', audience: 'PERSON',
+      },
+      {
+        code: 'COMPLAINT_RESOLVED', nameZh: '投诉处理结果',
+        titleZh: '你的投诉有结果了',
+        // 不成立也要发。反映了石沉大海，下次就没人再用这个渠道了
+        bodyZh: '{code}（{type}）：{outcome}。{resolution}',
+        titleId: 'Hasil pengaduan', bodyId: '{code} ({type}): {outcome}. {resolution}',
+        titleEn: 'Complaint result', bodyEn: '{code} ({type}): {outcome}. {resolution}',
+        channels: 'IN_APP,WHATSAPP', audience: 'PERSON',
       },
       {
         code: 'ANNOUNCEMENT', nameZh: '公告推送',

@@ -524,8 +524,87 @@ async function computeAlerts(scope: number[] | null = null) {
     item: i.itemType.nameZh, quantity: i.quantity, price: i.itemType.price, issuedAt: i.issuedAt,
   }));
 
+  // 16. 投诉超时未处理
+  // 投诉和报修不一样：报修晚一天是难受，投诉晚一天是「反映了没人管」，
+  // 下一次这个人就不会再用这个渠道了。所以 SLA 卡得比报修紧。
+  const complaintsOpen = await prisma.complaint.findMany({
+    where: {
+      status: { in: ['NEW', 'ACCEPTED', 'INVESTIGATING'] },
+      ...(scope
+        ? {
+            OR: [
+              { targetRoom: { floor: { buildingId: { in: scope } } } },
+              { targetFloor: { buildingId: { in: scope } } },
+            ],
+          }
+        : {}),
+    },
+    include: {
+      type: true,
+      targetRoom: { include: { floor: { include: { building: true } } } },
+      targetFloor: { include: { building: true } },
+    },
+  });
+  const complaintOverdue = complaintsOpen
+    .filter((c) => Date.now() > c.submittedAt.getTime() + c.type.slaHours * 3600000)
+    .map((c) => ({
+      id: c.id, code: c.code, type: c.type.nameZh, status: c.status,
+      // 匿名投诉人的身份不进告警列表 —— 告警是给所有有 report:read 的人看的
+      anonymous: c.anonymous,
+      location: c.targetRoom
+        ? `${c.targetRoom.floor.building.code}栋 ${c.targetRoom.code}`
+        : c.targetFloor
+          ? `${c.targetFloor.building.code}栋 ${c.targetFloor.level}层 ${c.targetArea ?? ''}`.trim()
+          : (c.targetArea ?? ''),
+      submittedAt: c.submittedAt,
+      slaHours: c.type.slaHours,
+      overdueHours: Math.round((Date.now() - c.submittedAt.getTime()) / 3600000 - c.type.slaHours),
+    }))
+    .sort((a, b) => b.overdueHours - a.overdueHours);
+
+  // 17. 同一房间被多人反复反映
+  // 「三个不同房间独立反映 A-305」和「一个人投了 A-305 三次」是完全不同的两件事，
+  // 所以这里按【不同投诉人数】判，不按条数判 —— 条数会被一个人刷出来。
+  const hotWindowDays = await getSetting<number>('complaint.hotRoomWindowDays', 30);
+  const hotThreshold = await getSetting<number>('complaint.repeatThreshold', 3);
+  const recentComplaints = await prisma.complaint.findMany({
+    where: {
+      submittedAt: { gte: new Date(Date.now() - hotWindowDays * 86400000) },
+      targetRoomId: { not: null },
+      status: { notIn: ['WITHDRAWN', 'DUPLICATE'] },
+      ...(scope ? { targetRoom: { floor: { buildingId: { in: scope } } } } : {}),
+    },
+    include: { targetRoom: { include: { floor: { include: { building: true } } } }, type: true },
+  });
+  const hotMap = new Map<number, any>();
+  for (const c of recentComplaints) {
+    const k = c.targetRoomId!;
+    if (!hotMap.has(k)) {
+      hotMap.set(k, {
+        roomId: k, roomCode: c.targetRoom!.code,
+        buildingCode: c.targetRoom!.floor.building.code,
+        floorLevel: c.targetRoom!.floor.level,
+        count: 0, complainantIds: new Set<number>(), substantiated: 0, types: new Set<string>(),
+      });
+    }
+    const r = hotMap.get(k);
+    r.count += 1;
+    r.complainantIds.add(c.complainantId);
+    r.types.add(c.type.nameZh);
+    if (c.status === 'SUBSTANTIATED') r.substantiated += 1;
+  }
+  const complaintHotRooms = [...hotMap.values()]
+    .map((r) => ({
+      roomId: r.roomId, roomCode: r.roomCode, buildingCode: r.buildingCode, floorLevel: r.floorLevel,
+      count: r.count, complainants: r.complainantIds.size,
+      substantiated: r.substantiated, types: [...r.types],
+      windowDays: hotWindowDays,
+    }))
+    .filter((r) => r.complainants >= hotThreshold)
+    .sort((a, b) => b.complainants - a.complainants);
+
   return {
-    thresholds: { warningDays, idWarnDays, staleDays, pointsThreshold },
+    thresholds: { warningDays, idWarnDays, staleDays, pointsThreshold, hotThreshold, hotWindowDays },
     resignedStillHoused: resignedRows.map((o) => ({
       occupancyId: o.id, personId: o.personId, employeeNo: o.person.employeeNo,
       name: o.person.name, department: o.person.department?.nameZh ?? null,
@@ -561,6 +640,8 @@ async function computeAlerts(scope: number[] | null = null) {
     dependentApart,
     visitorOverstay,
     pendingRequests,
+    complaintOverdue,
+    complaintHotRooms,
     itemsNotReturned,
   };
 }

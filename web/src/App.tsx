@@ -4,7 +4,7 @@ import {
   DashboardOutlined, ApartmentOutlined, TeamOutlined, HeartOutlined,
   FileTextOutlined, WarningOutlined, SettingOutlined, ToolOutlined,
   SafetyCertificateOutlined, UserSwitchOutlined, AuditOutlined, FireOutlined,
-  ApiOutlined, UserOutlined, LogoutOutlined, KeyOutlined, ImportOutlined,
+  ApiOutlined, UserOutlined, LogoutOutlined, KeyOutlined, ImportOutlined, NotificationOutlined,
 } from '@ant-design/icons';
 import { Routes, Route, useNavigate, useLocation, Navigate } from 'react-router-dom';
 import { api } from './api';
@@ -20,6 +20,7 @@ import Families from './pages/Families';
 import Requests from './pages/Requests';
 import WorkOrders from './pages/WorkOrders';
 import Violations from './pages/Violations';
+import Complaints from './pages/Complaints';
 import Visitors from './pages/Visitors';
 import Inspections from './pages/Inspections';
 import Roster from './pages/Roster';
@@ -39,7 +40,7 @@ export default function App() {
   const { user, loading, logout, can, refresh } = useAuth();
   const { message } = AntApp.useApp();
   const [meta, setMeta] = useState<any>(null);
-  const [counts, setCounts] = useState<any>({ alerts: 0, requests: 0, workOrders: 0 });
+  const [counts, setCounts] = useState<any>({ alerts: 0, requests: 0, workOrders: 0, complaints: 0 });
   const [pwdOpen, setPwdOpen] = useState(false);
   const [form] = Form.useForm();
 
@@ -48,8 +49,12 @@ export default function App() {
     api.meta().then(setMeta).catch(() => {});
     api.dashboard().then((d) => {
       const alerts = Object.values(d.alertCounts as Record<string, number>).reduce((a: number, b: any) => a + b, 0);
-      setCounts({ alerts, requests: d.operations.requestsPending, workOrders: d.operations.workOrdersOpen });
+      setCounts((c: any) => ({ ...c, alerts, requests: d.operations.requestsPending, workOrders: d.operations.workOrdersOpen }));
     }).catch(() => {});
+    // 投诉计数单独取 —— 它受「派发路径」约束，宿管看不到走 MANAGER 的那些
+    api.complaintStats()
+      .then((s) => setCounts((c: any) => ({ ...c, complaints: s.open })))
+      .catch(() => {});
   }, [user]);
 
   // 首次登录强制改密
@@ -78,6 +83,7 @@ export default function App() {
       label: t('grp_ops'), items: [
         { key: '/requests', icon: <AuditOutlined />, label: withBadge(t('nav_requests'), counts.requests), perm: 'request:read' },
         { key: '/workorders', icon: <ToolOutlined />, label: withBadge(t('nav_workorders'), counts.workOrders), perm: 'workorder:read' },
+        { key: '/complaints', icon: <NotificationOutlined />, label: withBadge(t('nav_complaints'), counts.complaints), perm: 'complaint:read' },
         { key: '/violations', icon: <SafetyCertificateOutlined />, label: t('nav_violations'), perm: 'violation:read' },
         { key: '/visitors', icon: <UserSwitchOutlined />, label: t('nav_visitors'), perm: 'visitor:read' },
         { key: '/inspections', icon: <FileTextOutlined />, label: t('nav_inspections'), perm: 'inspection:read' },
@@ -179,6 +185,7 @@ export default function App() {
               <Route path="/families" element={<Families />} />
               <Route path="/requests" element={<Requests />} />
               <Route path="/workorders" element={<WorkOrders />} />
+              <Route path="/complaints" element={<Complaints />} />
               <Route path="/violations" element={<Violations />} />
               <Route path="/visitors" element={<Visitors />} />
               <Route path="/inspections" element={<Inspections />} />

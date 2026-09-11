@@ -14,6 +14,7 @@ REST + JSON。所有路径以 `/api` 开头。
 - [人员与关系](#人员与关系)
 - [床位分配](#床位分配)
 - [日常运营](#日常运营)
+- [投诉](#投诉)
 - [报表](#报表)
 - [批量导入](#批量导入)
 - [集成与通知](#集成与通知)
@@ -144,6 +145,9 @@ Content-Type: application/json
 | `inspection:write` | 查寝与检查 |
 | `item:write` | 物品发放归还 |
 | `request:read` / `request:write` | 申请审批 |
+| `complaint:read` / `complaint:write` | 投诉的查看与处理 |
+| **`complaint:all`** | **看得到所有派发路径的投诉**。没有它只看得到 `routeTo=WARDEN` 的 |
+| **`complaint:identity`** | **揭示匿名投诉人身份**。楼栋宿管没有。每次调用写审计 |
 | `config:write` | 字典、阈值、排宿规则 |
 | `integration:write` | **集成凭据（仅管理员）** |
 | `user:read` / `user:write` | 账号与角色 |
@@ -151,6 +155,10 @@ Content-Type: application/json
 
 `config:write` 和 `integration:write` 是分开的 —— 宿舍主管可以调阈值和规则，
 但不能碰企业平台凭据。
+
+**`complaint:all` 和 `complaint:identity` 刻意不给楼栋宿管**：
+前者保证「投诉宿管本人」那类投诉不会落到被投诉人自己手上，
+后者保证员工敢匿名投诉本楼的事。两条都在服务端收口，不是前端隐藏。
 
 ---
 
@@ -187,7 +195,8 @@ GET /api/meta
 ### 字典 CRUD
 
 `{dict}` 可取：`nationalities` `departments` `positionLevels` `shifts` `religions`
-`contractors` `roomTypes` `itemTypes` `violationTypes` `workOrderCategories` `roles`
+`contractors` `roomTypes` `itemTypes` `violationTypes` `workOrderCategories`
+`complaintTypes` `roles`
 
 | | 路径 | 权限 |
 |---|---|---|
@@ -377,6 +386,99 @@ POST /api/allocation/assign-couple
 
 ---
 
+## 投诉
+
+投诉是**一面之词**，和 `Violation`（已查实）是两张表。认定成立才生成违规记录。
+
+### 可见性
+
+两层同时生效，都在服务端 `complaintScope()` 里收口：
+
+| 条件 | 效果 |
+|---|---|
+| 没有 `complaint:all` | 只看得到 `routeTo = 'WARDEN'` 的投诉 |
+| 有楼栋数据范围 | 只看得到目标房间 / 楼层在范围内的 |
+
+不在范围内的投诉一律 `404`（不是 403）—— 连「它存在」都不透露。
+
+### 匿名
+
+**列表和详情接口永远不返回匿名投诉的 `complainant` 字段**，管理员也一样。
+要看身份必须单独调 `/identity`，需要 `complaint:identity` 权限，且每次写 `AuditLog`。
+
+响应里的 `canReveal` 只表示「前端要不要显示那个按钮」，不含任何身份信息。
+
+| | 路径 | 权限 | 说明 |
+|---|---|---|---|
+| GET | `/api/complaints` | `complaint:read` | 列表。`?status&open&typeId&anonymous&buildingId&q&page&pageSize` |
+| GET | `/api/complaints/stats` | `complaint:read` | 待办结 / 成立 / 不成立 / 匿名数 / **认定成立率** |
+| GET | `/api/complaints/hot-rooms` | `complaint:read` | 被反复反映的房间，按**不同投诉人数**排 |
+| GET | `/api/complaints/:id` | `complaint:read` | 详情 + 流水 + 关联投诉 + **被投诉房间在住名单** + 附件 |
+| **GET** | **`/api/complaints/:id/identity`** | **`complaint:identity`** | **揭示匿名投诉人。写审计** |
+| POST | `/api/complaints` | `complaint:write` | 宿管代录（当面口头投诉），一律实名 |
+| PUT | `/api/complaints/:id/accept` | `complaint:write` | 受理，通知投诉人 |
+| PUT | `/api/complaints/:id/investigate` | `complaint:write` | 转核实。备注默认**对投诉人不可见** |
+| PUT | `/api/complaints/:id/resolve` | `complaint:write` | 认定，见下 |
+| PUT | `/api/complaints/:id/close` | `complaint:write` | 归档 |
+| POST | `/api/complaints/:id/comment` | `complaint:write` | 加备注，可选是否对投诉人可见 |
+| PUT | `/api/complaints/:id/merge` | `complaint:write` | 合并到主单，原始记录不删 |
+| GET | `/api/complaints/:id/attachments/:attId` | `complaint:read` | 附件。走鉴权，不放静态目录 |
+
+### 认定
+
+```http
+PUT /api/complaints/123/resolve
+{
+  "outcome": "SUBSTANTIATED",
+  "resolution": "当晚 23:30 现场核实属实，已当面提醒并记录违规。",
+  "violationTypeId": 8,
+  "violationPersonIds": [1024, 1088]
+}
+```
+
+- `outcome` ∈ `SUBSTANTIATED` / `UNSUBSTANTIATED` / `DUPLICATE`
+- **`resolution` 必填**，不成立也要写 —— 这段话原样发给投诉人。缺它返回 `400`
+- `violationPersonIds` 留空 = 只在房间上记一条违规（找不到具体责任人时很常见）
+- `violationTypeId` 留空 = 不生成违规，只把投诉标为成立
+- 返回体带 `violationCodes[]`，列出实际开出的违规单号
+
+### 员工自助端的投诉接口
+
+| | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/self/complaint-options` | 类别（含 `allowAnonymous`）+ 本楼各层房间 + 附件大小上限 |
+| GET | `/api/self/complaints` | 我的投诉。**只返回标记为「对投诉人可见」的流水** |
+| POST | `/api/self/complaints` | 提交，见下 |
+| POST | `/api/self/complaints/:id/attachments` | 上传照片 / 录音（base64） |
+| PUT | `/api/self/complaints/:id/withdraw` | 撤回（仅 NEW / ACCEPTED） |
+| PUT | `/api/self/complaints/:id/rate` | 对处理结果打分 |
+
+```http
+POST /api/self/complaints
+{
+  "typeId": 1,
+  "anonymous": true,
+  "targetRoomId": 3457,
+  "occurredFrom": "2026-09-10T23:10:00+08:00",
+  "description": "隔壁凌晨两点还在唱歌"
+}
+```
+
+| 校验 | 不通过时 |
+|---|---|
+| 类别 / 位置 / 发生时间缺一 | `400` |
+| 发生时间在将来，或早于 `complaint.maxBacklogDays` | `400` |
+| 该类别强制实名却传了 `anonymous: true` | `400`，并说明为什么要实名 |
+| 24 小时内已达 `complaint.dailyLimit` 条 | **`429`** |
+| 对同一房间处在 `complaint.targetCooldownHours` 冷却期 | **`429`**，返回上一条的编号 |
+
+公共区域投诉传 `targetFloorId` + `targetArea` 代替 `targetRoomId`。
+
+附件单个上限 4MB、最多 5 个；照片由前端先缩到 1280px；
+服务端只接受白名单 MIME，**文件名由服务端生成**，不用前端传的名字拼路径。
+
+---
+
 ## 报表
 
 | | 路径 | 说明 |
@@ -405,7 +507,7 @@ POST /api/allocation/assign-couple
 }
 ```
 
-15 个告警 key：
+17 个告警 key：
 
 `resignedStillHoused` 离职未退宿 · `idExpiring` 证件即将到期 ·
 `workOrderOverdue` 报修超时 · `overCapacity` 房间超住 ·
@@ -414,7 +516,8 @@ POST /api/allocation/assign-couple
 `visitorOverstay` 访客超期未离开 · `pendingRequests` 申请待审批 ·
 `itemsNotReturned` 物品未归还 · `reservedStale` 已分配超期未入住 ·
 `statusMismatch` 状态口径不一致 · `deratedMismatch` 降标与床位不一致 ·
-`functionRoomOccupied` 功能房被占住
+`functionRoomOccupied` 功能房被占住 · `complaintOverdue` 投诉超时未处理 ·
+`complaintHotRooms` 同一房间被多人反复反映
 
 `GET /api/dashboard` 里会带上各类告警的**计数**，明细才需要调 `/api/alerts`。
 
@@ -531,3 +634,5 @@ POST /api/self/workorders
 | 检查类型 | `NIGHT_ROLL_CALL` `HYGIENE` `SAFETY` |
 | 关系类型 | `SPOUSE` `CHILD` `PARENT` `SIBLING` `OTHER` |
 | 规则档位 | `OFF` `SOFT` `HARD` |
+| 投诉状态 | `NEW` `ACCEPTED` `INVESTIGATING` `SUBSTANTIATED` `UNSUBSTANTIATED` `DUPLICATE` `WITHDRAWN` `CLOSED` |
+| 投诉派发 | `WARDEN` `MANAGER` `EHS` `HR` |

@@ -19,6 +19,7 @@ const DICTS = {
   itemTypes: 'itemType',
   violationTypes: 'violationType',
   workOrderCategories: 'workOrderCategory',
+  complaintTypes: 'complaintType',
   roles: 'role',
 } as const;
 
@@ -27,7 +28,7 @@ export default async function configRoutes(app: FastifyInstance) {
   app.get('/api/meta', async () => {
     const [
       nationalities, departments, positionLevels, shifts, religions, contractors,
-      roomTypes, itemTypes, violationTypes, workOrderCategories, roles, users, settings, site,
+      roomTypes, itemTypes, violationTypes, workOrderCategories, complaintTypes, roles, users, settings, site,
     ] = await Promise.all([
       prisma.nationality.findMany({ orderBy: { sortOrder: 'asc' } }),
       prisma.department.findMany({ orderBy: { sortOrder: 'asc' } }),
@@ -39,6 +40,7 @@ export default async function configRoutes(app: FastifyInstance) {
       prisma.itemType.findMany({ orderBy: { sortOrder: 'asc' } }),
       prisma.violationType.findMany({ orderBy: { id: 'asc' } }),
       prisma.workOrderCategory.findMany({ orderBy: { id: 'asc' } }),
+      prisma.complaintType.findMany({ orderBy: { sortOrder: 'asc' } }),
       prisma.role.findMany({ orderBy: { id: 'asc' } }),
       prisma.user.findMany({ include: { role: true, buildings: { include: { building: true } } } }),
       prisma.settingItem.findMany(),
@@ -51,7 +53,7 @@ export default async function configRoutes(app: FastifyInstance) {
     return {
       site,
       nationalities, departments, positionLevels, shifts, religions, contractors,
-      roomTypes, itemTypes, violationTypes, workOrderCategories, roles,
+      roomTypes, itemTypes, violationTypes, workOrderCategories, complaintTypes, roles,
       users: users.map((u) => ({
         id: u.id, username: u.username, name: u.name, role: u.role.nameZh, roleCode: u.role.code,
         buildings: u.buildings.map((b) => ({ id: b.building.id, code: b.building.code })),
@@ -69,6 +71,8 @@ export default async function configRoutes(app: FastifyInstance) {
       requestTypes: ['CHECKIN', 'TRANSFER', 'CHECKOUT', 'COUPLE_ROOM', 'VISITOR_OVERNIGHT', 'EXTRA_BED'],
       inspectionTypes: ['NIGHT_ROLL_CALL', 'HYGIENE', 'SAFETY'],
       relationshipTypes: ['SPOUSE', 'CHILD', 'PARENT', 'SIBLING', 'OTHER'],
+      complaintStatuses: ['NEW', 'ACCEPTED', 'INVESTIGATING', 'SUBSTANTIATED', 'UNSUBSTANTIATED', 'DUPLICATE', 'WITHDRAWN', 'CLOSED'],
+      complaintRoutes: ['WARDEN', 'MANAGER', 'EHS', 'HR'],
     };
   });
 

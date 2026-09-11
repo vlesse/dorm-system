@@ -129,3 +129,17 @@
 .self-login .ant-input-affix-wrapper { min-height: 44px !important; font-size: 16px !important; }
 .self-shell .ant-btn, .self-login .ant-btn { min-height: 44px; font-size: 15px; }
 .self-shell .ant-btn-sm { min-height: 32px; font-size: 13px; }
+
+/* 投诉表单：标签和提示。工人站在走廊上单手填，字号要比管理端大一档 */
+.self-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: #262626;
+  margin-bottom: 6px;
+}
+.self-hint {
+  font-size: 12px;
+  color: #8c8c8c;
+  line-height: 1.6;
+  margin-top: 6px;
+}

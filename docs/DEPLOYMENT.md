@@ -142,7 +142,7 @@ After=network.target
 Type=simple
 WorkingDirectory=/opt/dorm-system
 EnvironmentFile=/opt/dorm-system/.env
-ExecStart=/usr/bin/node /opt/dorm-system/dist/index.js
+ExecStart=/usr/bin/node /opt/dorm-system/dist/src/index.js
 Restart=always
 RestartSec=5
 
@@ -242,7 +242,7 @@ systemctl status certbot.timer
 ```bash
 # 本地
 npm run db:seed
-scp server/prisma/dev.db $SERVER:/opt/dorm-system/data/dorm.db
+scp server/prisma/dorm.db $SERVER:/opt/dorm-system/data/dorm.db
 ssh $SERVER 'systemctl restart dorm-system'
 ```
 

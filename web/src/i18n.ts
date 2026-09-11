@@ -24,6 +24,7 @@ const D: Dict = {
   nav_requests: ['申请审批', 'Persetujuan', 'Requests'],
   nav_workorders: ['报修工单', 'Perbaikan', 'Work Orders'],
   nav_violations: ['违规记录', 'Pelanggaran', 'Violations'],
+  nav_complaints: ['投诉处理', 'Pengaduan', 'Complaints'],
   nav_visitors: ['访客登记', 'Tamu', 'Visitors'],
   nav_inspections: ['查寝与检查', 'Inspeksi', 'Inspections'],
   nav_roster: ['在住花名册', 'Daftar Penghuni', 'Roster'],
@@ -198,6 +199,8 @@ const D: Dict = {
   alert_couple: ['夫妻房异常', 'Anomali Kamar Pasangan', 'Couple Room Anomalies'],
   alert_dependentApart: ['家属未与员工同房', 'Keluarga Terpisah', 'Dependents Separated'],
   alert_visitorOverstay: ['访客超期未离开', 'Tamu Melebihi Waktu', 'Visitor Overstay'],
+  alert_complaintOverdue: ['投诉超时未处理', 'Pengaduan Terlambat', 'Complaints Overdue'],
+  alert_complaintHotRooms: ['被多人反复反映的房间', 'Kamar Sering Diadukan', 'Repeatedly Reported Rooms'],
   alert_pendingRequests: ['申请待审批', 'Permohonan Menunggu', 'Pending Requests'],
   alert_itemsNotReturned: ['物品未归还', 'Barang Belum Kembali', 'Items Not Returned'],
 

@@ -51,6 +51,14 @@ export const selfApi = {
   createWorkOrder: (b: { categoryId: number; title: string; description?: string }) => post('/workorders', b),
   rateWorkOrder: (id: number, rating: number) => put(`/workorders/${id}/rate`, { rating }),
 
+  complaints: () => req<any[]>('/complaints'),
+  complaintOptions: () => req<any>('/complaint-options'),
+  createComplaint: (b: any) => post('/complaints', b),
+  uploadComplaintAttachment: (id: number, b: any) => post(`/complaints/${id}/attachments`, b),
+  withdrawComplaint: (id: number) => put(`/complaints/${id}/withdraw`),
+  rateComplaint: (id: number, rating: number, comment?: string) =>
+    put(`/complaints/${id}/rate`, { rating, comment }),
+
   requests: () => req<any[]>('/requests'),
   createRequest: (b: { type: string; reason: string }) => post('/requests', b),
   cancelRequest: (id: number) => put(`/requests/${id}/cancel`),

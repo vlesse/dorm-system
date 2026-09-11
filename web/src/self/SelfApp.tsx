@@ -2,7 +2,7 @@ import { useEffect, useState, createContext, useContext } from 'react';
 import { Routes, Route, useNavigate, useLocation, Navigate } from 'react-router-dom';
 import { Spin, Select, Badge } from 'antd';
 import {
-  HomeOutlined, ToolOutlined, FileTextOutlined, UserOutlined,
+  HomeOutlined, ToolOutlined, FileTextOutlined, UserOutlined, NotificationOutlined,
 } from '@ant-design/icons';
 import { selfApi, setSelfToken, setSelfUnauthenticatedHandler } from './selfApi';
 import { useSelfT } from './selfI18n';
@@ -11,6 +11,7 @@ import SelfLogin from './SelfLogin';
 import SelfHome from './SelfHome';
 import SelfRepair from './SelfRepair';
 import SelfRequests from './SelfRequests';
+import SelfComplaint from './SelfComplaint';
 import SelfMe from './SelfMe';
 import SelfRoom from './SelfRoom';
 import './self.css';
@@ -62,6 +63,7 @@ export default function SelfApp() {
     { key: '/m', icon: <HomeOutlined />, label: t('navHome') },
     { key: '/m/repair', icon: <ToolOutlined />, label: t('navRepair'), badge: profile.counts.openWorkOrders },
     { key: '/m/request', icon: <FileTextOutlined />, label: t('navRequest'), badge: profile.counts.pendingRequests },
+    { key: '/m/complaint', icon: <NotificationOutlined />, label: t('navComplaint'), badge: profile.counts.openComplaints },
     { key: '/m/me', icon: <UserOutlined />, label: t('navMe'), badge: profile.counts.unreadNotifications },
   ];
   const active = [...tabs].reverse().find((x) => loc.pathname === x.key || (x.key !== '/m' && loc.pathname.startsWith(x.key)))?.key ?? '/m';
@@ -83,6 +85,7 @@ export default function SelfApp() {
             <Route index element={<SelfHome />} />
             <Route path="repair" element={<SelfRepair />} />
             <Route path="request" element={<SelfRequests />} />
+            <Route path="complaint" element={<SelfComplaint />} />
             <Route path="me" element={<SelfMe />} />
             <Route path="room/:code" element={<SelfRoom />} />
             <Route path="*" element={<Navigate to="/m" replace />} />

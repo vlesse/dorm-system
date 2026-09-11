@@ -100,6 +100,22 @@ export const api = {
   createViolation: (b: any) => post('/violations', b),
   updateViolation: (id: number, b: any) => put(`/violations/${id}`, b),
   violationRanking: () => req<any[]>('/violations/ranking'),
+
+  // 投诉
+  complaints: (q: Record<string, any> = {}) => req<any>(`/complaints${qs(q)}`),
+  complaint: (id: number) => req<any>(`/complaints/${id}`),
+  complaintStats: () => req<any>('/complaints/stats'),
+  complaintHotRooms: () => req<any[]>('/complaints/hot-rooms'),
+  createComplaint: (b: any) => post('/complaints', b),
+  acceptComplaint: (id: number, note?: string) => put(`/complaints/${id}/accept`, { note }),
+  investigateComplaint: (id: number, note?: string) => put(`/complaints/${id}/investigate`, { note }),
+  resolveComplaint: (id: number, b: any) => put(`/complaints/${id}/resolve`, b),
+  closeComplaint: (id: number, note?: string) => put(`/complaints/${id}/close`, { note }),
+  commentComplaint: (id: number, note: string, visibleToComplainant: boolean) =>
+    post(`/complaints/${id}/comment`, { note, visibleToComplainant }),
+  mergeComplaint: (id: number, intoId: number) => put(`/complaints/${id}/merge`, { intoId }),
+  /** 揭示匿名投诉人身份。每次调用服务端都会写审计日志 */
+  complaintIdentity: (id: number) => req<any>(`/complaints/${id}/identity`),
   visitors: (q: Record<string, any> = {}) => req<any[]>(`/visitors${qs(q)}`),
   createVisitor: (b: any) => post('/visitors', b),
   updateVisitor: (id: number, b: any) => put(`/visitors/${id}`, b),

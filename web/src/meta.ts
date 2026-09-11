@@ -27,6 +27,9 @@ export interface Meta {
   requestTypes: string[];
   inspectionTypes: string[];
   relationshipTypes: string[];
+  complaintTypes: any[];
+  complaintStatuses: string[];
+  complaintRoutes: string[];
 }
 
 export const MetaContext = createContext<Meta>(null as unknown as Meta);
@@ -162,6 +165,25 @@ export const BED_POSITION_LABEL = M({
 });
 
 const IDX = { zh: 0, id: 1, en: 2 } as const;
+export const COMPLAINT_STATUS_LABEL = M({
+  NEW: ['待受理', 'Baru', 'New'],
+  ACCEPTED: ['已受理', 'Diterima', 'Accepted'],
+  INVESTIGATING: ['核实中', 'Diperiksa', 'Investigating'],
+  SUBSTANTIATED: ['认定成立', 'Terbukti', 'Substantiated'],
+  UNSUBSTANTIATED: ['认定不成立', 'Tidak Terbukti', 'Unsubstantiated'],
+  DUPLICATE: ['重复投诉', 'Duplikat', 'Duplicate'],
+  WITHDRAWN: ['已撤回', 'Ditarik', 'Withdrawn'],
+  CLOSED: ['已归档', 'Ditutup', 'Closed'],
+});
+
+/** 派发路径。投诉宿管本人的那类走 MANAGER，宿管看不到 —— 见服务端 complaintScope */
+export const COMPLAINT_ROUTE_LABEL = M({
+  WARDEN: ['本楼宿管', 'Pengelola Gedung', 'Building Warden'],
+  MANAGER: ['宿舍主管', 'Kepala Asrama', 'Dorm Manager'],
+  EHS: ['安全环保', 'K3L', 'EHS'],
+  HR: ['人力资源', 'HRD', 'HR'],
+});
+
 export function labelOf(
   map: Record<string, L3>,
   key: string,
@@ -176,6 +198,12 @@ export const PRIORITY_COLOR: Record<string, string> = {
 export const SEVERITY_COLOR: Record<string, string> = {
   LOW: 'default', MEDIUM: 'gold', HIGH: 'orange', CRITICAL: 'red',
 };
+export const COMPLAINT_STATUS_COLOR: Record<string, string> = {
+  NEW: 'red', ACCEPTED: 'orange', INVESTIGATING: 'blue',
+  SUBSTANTIATED: 'green', UNSUBSTANTIATED: 'default',
+  DUPLICATE: 'default', WITHDRAWN: 'default', CLOSED: 'default',
+};
+
 export const WO_STATUS_COLOR: Record<string, string> = {
   NEW: 'red', ASSIGNED: 'orange', IN_PROGRESS: 'blue', DONE: 'green', CLOSED: 'default', REJECTED: 'default',
 };

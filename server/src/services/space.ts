@@ -212,7 +212,7 @@ export async function loadRoom(roomId: number) {
 }
 
 /** 生成业务单号：WO20260902-0001 这种 */
-export async function nextCode(prefix: string, model: 'workOrder' | 'violation' | 'visitor' | 'inspection' | 'request') {
+export async function nextCode(prefix: string, model: 'workOrder' | 'violation' | 'visitor' | 'inspection' | 'request' | 'complaint') {
   const d = new Date();
   const day = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
   const head = `${prefix}${day}`;

@@ -7,3 +7,5 @@ server/prisma/*.db*
 *.tsbuildinfo
 .DS_Store
 DEPLOY.local.md
+data/uploads/
+server/data/

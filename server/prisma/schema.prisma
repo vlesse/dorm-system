@@ -56,17 +56,17 @@ model Department {
 
 /// 职级。休假周期挂在这里，随时可改
 model PositionLevel {
-  id               Int     @id @default(autoincrement())
-  code             String  @unique
-  nameZh           String
-  nameEn           String
-  nameId           String
-  rank             Int     @default(0) // 越大职级越高
-  leaveCycleMonths Float   @default(6) // 休假周期（月），支持 5.5
-  isLeadership     Boolean @default(false) // 中层及以上，决定可住干部房
+  id                Int     @id @default(autoincrement())
+  code              String  @unique
+  nameZh            String
+  nameEn            String
+  nameId            String
+  rank              Int     @default(0) // 越大职级越高
+  leaveCycleMonths  Float   @default(6) // 休假周期（月），支持 5.5
+  isLeadership      Boolean @default(false) // 中层及以上，决定可住干部房
   /// 可申请夫妻房的最低职级门槛，null = 不限（园区常见做法是有门槛）
   coupleRoomAllowed Boolean @default(false)
-  isActive         Boolean @default(true)
+  isActive          Boolean @default(true)
 
   persons Person[]
 }
@@ -101,42 +101,42 @@ model Contractor {
 
 /// 宗教信仰。影响祷告作息、斋月、饮食（清真），排宿时作为软约束
 model Religion {
-  id       Int     @id @default(autoincrement())
-  code     String  @unique
-  nameZh   String
-  nameEn   String
-  nameId   String
+  id             Int     @id @default(autoincrement())
+  code           String  @unique
+  nameZh         String
+  nameEn         String
+  nameId         String
   /// 是否有饮食禁忌（清真等），同房尽量一致
   hasDietaryRule Boolean @default(false)
-  isActive Boolean @default(true)
+  isActive       Boolean @default(true)
 
   persons Person[]
 }
 
 /// 房型。规格 + 准入门槛 + 管理模式，全部可配
 model RoomType {
-  id              Int     @id @default(autoincrement())
-  code            String  @unique
-  nameZh          String
-  nameEn          String
-  nameId          String
+  id               Int     @id @default(autoincrement())
+  code             String  @unique
+  nameZh           String
+  nameEn           String
+  nameId           String
   /// STANDARD 常规宿舍 / HOTEL 酒店式（可预订、按天计费）
-  managementMode  String  @default("STANDARD")
+  managementMode   String  @default("STANDARD")
   /// 标称规格人数："四人间" = 4。具体房间的核定人数看 Room.capacity
-  defaultCapacity Int     @default(6)
-  minPositionRank Int? // 入住所需最低职级 rank，null = 不限
-  dailyRate       Float   @default(0) // 每人天费用
+  defaultCapacity  Int     @default(6)
+  minPositionRank  Int? // 入住所需最低职级 rank，null = 不限
+  dailyRate        Float   @default(0) // 每人天费用
   /// 夫妻房：只能住已登记配偶关系的两人
-  isCoupleRoom    Boolean @default(false)
+  isCoupleRoom     Boolean @default(false)
   /// 允许男女同房（夫妻房 / 家庭房），会跳过室友性别检查
   allowMixedGender Boolean @default(false)
   /// 允许家属（非员工）入住
-  allowDependents Boolean @default(false)
+  allowDependents  Boolean @default(false)
   /// false = 功能房（洗衣房 / 祷告室 / 宿管室…），占楼层空间但不住人
-  isResidential   Boolean @default(true)
-  color           String  @default("#d9d9d9")
-  sortOrder       Int     @default(0)
-  isActive        Boolean @default(true)
+  isResidential    Boolean @default(true)
+  color            String  @default("#d9d9d9")
+  sortOrder        Int     @default(0)
+  isActive         Boolean @default(true)
 
   rooms Room[]
 }
@@ -172,23 +172,51 @@ model ViolationType {
   defaultFine   Float   @default(0) // 罚款
   isActive      Boolean @default(true)
 
-  violations Violation[]
+  violations     Violation[]
+  complaintTypes ComplaintType[]
 }
 
 /// 报修类别
 model WorkOrderCategory {
-  id           Int     @id @default(autoincrement())
-  code         String  @unique
-  nameZh       String
-  nameEn       String
-  nameId       String
+  id              Int     @id @default(autoincrement())
+  code            String  @unique
+  nameZh          String
+  nameEn          String
+  nameId          String
   /// 承诺完成时限（小时），用于超时告警
-  slaHours     Int     @default(48)
+  slaHours        Int     @default(48)
   /// 该类故障是否默认导致房间不可住（如漏水、断电）
   blocksByDefault Boolean @default(false)
-  isActive     Boolean @default(true)
+  isActive        Boolean @default(true)
 
   workOrders WorkOrder[]
+}
+
+/// 投诉类别。和「报修类别」是两件事：报修是物的问题，投诉是**人的行为**。
+model ComplaintType {
+  id              Int     @id @default(autoincrement())
+  code            String  @unique
+  nameZh          String
+  nameEn          String
+  nameId          String
+  /// 处理时限（小时）。噪音这类要当天出结果，卫生可以慢一点
+  slaHours        Int     @default(24)
+  /// 是否允许匿名提交。
+  /// 涉及财物损失 / 肢体冲突这类需要当事人配合取证的，强制实名 —— 匿名了就查不下去
+  allowAnonymous  Boolean @default(true)
+  /// 派给谁：WARDEN 本楼宿管 / MANAGER 宿舍主管 / EHS 安全环保 / HR 人力资源。
+  /// **投诉宿管本人的必须绕开本楼宿管** —— 否则这类投诉永远处理不了，
+  /// 而且投诉人会被反向识别出来。这是这个字段存在的唯一理由。
+  routeTo         String  @default("WARDEN")
+  /// 认定成立后默认转成哪种违规。空 = 不自动转，需要人工选
+  violationTypeId Int?
+  /// LOW / MEDIUM / HIGH / CRITICAL
+  severity        String  @default("MEDIUM")
+  sortOrder       Int     @default(0)
+  isActive        Boolean @default(true)
+
+  violationType ViolationType? @relation(fields: [violationTypeId], references: [id])
+  complaints    Complaint[]
 }
 
 /// 通用设置项，value 存 JSON 字符串
@@ -216,21 +244,21 @@ model Role {
 }
 
 model User {
-  id        Int      @id @default(autoincrement())
-  username  String   @unique
-  name      String
-  roleId    Int
-  phone     String?
+  id                 Int       @id @default(autoincrement())
+  username           String    @unique
+  name               String
+  roleId             Int
+  phone              String?
   /// 关联的员工档案（可空，比如总部账号）
-  personId  Int?
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
+  personId           Int?
+  isActive           Boolean   @default(true)
+  createdAt          DateTime  @default(now())
   /// scrypt 哈希，格式 salt:hash。为空表示只能用外部平台登录
-  passwordHash String?
+  passwordHash       String?
   /// 首次登录必须改密码
-  mustChangePassword Boolean @default(false)
-  lastLoginAt  DateTime?
-  locale       String   @default("zh")
+  mustChangePassword Boolean   @default(false)
+  lastLoginAt        DateTime?
+  locale             String    @default("zh")
 
   role          Role              @relation(fields: [roleId], references: [id])
   buildings     UserBuilding[]
@@ -296,6 +324,7 @@ model Floor {
   building    Building     @relation(fields: [buildingId], references: [id], onDelete: Cascade)
   nationality Nationality? @relation(fields: [nationalityId], references: [id])
   rooms       Room[]
+  complaints  Complaint[]  @relation("ComplaintFloor")
 
   @@unique([buildingId, level])
   @@index([buildingId])
@@ -304,34 +333,35 @@ model Floor {
 /// 房间
 /// status: AVAILABLE 可用 / MAINTENANCE 维修 / QUARANTINE 隔离 / LOCKED 封锁 / CLEANING 待清洁
 model Room {
-  id            Int     @id @default(autoincrement())
-  floorId       Int
-  code          String  @unique
-  name          String
-  roomTypeId    Int
+  id             Int     @id @default(autoincrement())
+  floorId        Int
+  code           String  @unique
+  name           String
+  roomTypeId     Int
   /// 核定人数 —— 这间房实际按几人住。可以小于房型标称（四人间按三人住）
-  capacity      Int     @default(6)
+  capacity       Int     @default(6)
   /// 降标原因：为什么核定人数少于标称规格
-  deratedReason String?
-  genderPolicy  String? // null = 跟随楼层 / 楼栋
-  nationalityId String? // null = 跟随楼层 / 楼栋
-  status        String  @default("AVAILABLE")
-  hasAC         Boolean @default(false)
-  hasBathroom   Boolean @default(false)
+  deratedReason  String?
+  genderPolicy   String? // null = 跟随楼层 / 楼栋
+  nationalityId  String? // null = 跟随楼层 / 楼栋
+  status         String  @default("AVAILABLE")
+  hasAC          Boolean @default(false)
+  hasBathroom    Boolean @default(false)
   hasWaterHeater Boolean @default(false)
-  hasBalcony    Boolean @default(false)
-  orientation   String? // 朝向：南 / 北 / 东 / 西
-  area          Float?
-  note          String?
+  hasBalcony     Boolean @default(false)
+  orientation    String? // 朝向：南 / 北 / 东 / 西
+  area           Float?
+  note           String?
 
-  floor       Floor        @relation(fields: [floorId], references: [id], onDelete: Cascade)
-  roomType    RoomType     @relation(fields: [roomTypeId], references: [id])
-  nationality Nationality? @relation(fields: [nationalityId], references: [id])
+  floor       Floor            @relation(fields: [floorId], references: [id], onDelete: Cascade)
+  roomType    RoomType         @relation(fields: [roomTypeId], references: [id])
+  nationality Nationality?     @relation(fields: [nationalityId], references: [id])
   beds        Bed[]
   assets      Asset[]
   violations  Violation[]
   visitors    Visitor[]
   inspections InspectionItem[]
+  complaints  Complaint[]      @relation("ComplaintRoom")
 
   @@index([floorId])
   @@index([status])
@@ -421,28 +451,29 @@ model Person {
   photoUrl         String?
   note             String?
 
-  nationality   Nationality      @relation(fields: [nationalityId], references: [id])
-  department    Department?      @relation(fields: [departmentId], references: [id])
-  positionLevel PositionLevel?   @relation(fields: [positionLevelId], references: [id])
-  shift         Shift?           @relation(fields: [shiftId], references: [id])
-  contractor    Contractor?      @relation(fields: [contractorId], references: [id])
-  religion      Religion?        @relation(fields: [religionId], references: [id])
-  hostPerson    Person?          @relation("Host", fields: [hostPersonId], references: [id])
-  dependents    Person[]         @relation("Host")
+  nationality   Nationality    @relation(fields: [nationalityId], references: [id])
+  department    Department?    @relation(fields: [departmentId], references: [id])
+  positionLevel PositionLevel? @relation(fields: [positionLevelId], references: [id])
+  shift         Shift?         @relation(fields: [shiftId], references: [id])
+  contractor    Contractor?    @relation(fields: [contractorId], references: [id])
+  religion      Religion?      @relation(fields: [religionId], references: [id])
+  hostPerson    Person?        @relation("Host", fields: [hostPersonId], references: [id])
+  dependents    Person[]       @relation("Host")
 
-  occupancies   Occupancy[]
-  events        OccupancyEvent[] @relation("PersonEvents")
-  relFrom       Relationship[]   @relation("RelFrom")
-  relTo         Relationship[]   @relation("RelTo")
-  issuedItems   IssuedItem[]
-  deposits      Deposit[]
-  violations    Violation[]
-  visitorsHosted Visitor[]       @relation("VisitorHost")
-  workOrders    WorkOrder[]      @relation("Reporter")
-  requests      Request[]        @relation("RequestPerson")
+  occupancies     Occupancy[]
+  events          OccupancyEvent[]  @relation("PersonEvents")
+  relFrom         Relationship[]    @relation("RelFrom")
+  relTo           Relationship[]    @relation("RelTo")
+  issuedItems     IssuedItem[]
+  deposits        Deposit[]
+  violations      Violation[]
+  visitorsHosted  Visitor[]         @relation("VisitorHost")
+  workOrders      WorkOrder[]       @relation("Reporter")
+  requests        Request[]         @relation("RequestPerson")
   inspectionItems InspectionItem[]
   identities      IdentityBinding[]
   notifications   Notification[]
+  complaintsFiled Complaint[]       @relation("Complainant")
 
   @@index([employmentStatus])
   @@index([departmentId])
@@ -585,31 +616,31 @@ model Deposit {
 // ============================== 报修工单 ==============================
 
 model WorkOrder {
-  id           Int       @id @default(autoincrement())
-  code         String    @unique
-  categoryId   Int
+  id              Int       @id @default(autoincrement())
+  code            String    @unique
+  categoryId      Int
   /// LOW / NORMAL / HIGH / URGENT
-  priority     String    @default("NORMAL")
-  title        String
-  description  String?
+  priority        String    @default("NORMAL")
+  title           String
+  description     String?
   /// 故障位置：ROOM / BED / FLOOR / BUILDING / PUBLIC（公共区域）
-  scopeType    String
-  scopeId      Int
-  reportedById Int?
-  reporterName String?
-  reportedAt   DateTime  @default(now())
-  assignedTo   String?
+  scopeType       String
+  scopeId         Int
+  reportedById    Int?
+  reporterName    String?
+  reportedAt      DateTime  @default(now())
+  assignedTo      String?
   /// NEW 待派工 / ASSIGNED 已派工 / IN_PROGRESS 处理中 / DONE 已完成 / CLOSED 已关闭 / REJECTED 已驳回
-  status       String    @default("NEW")
-  startedAt    DateTime?
-  finishedAt   DateTime?
-  closedAt     DateTime?
-  cost         Float     @default(0)
-  materials    String?
+  status          String    @default("NEW")
+  startedAt       DateTime?
+  finishedAt      DateTime?
+  closedAt        DateTime?
+  cost            Float     @default(0)
+  materials       String?
   /// 是否导致该房间/床位不可住 —— 会联动置为维修状态
-  blocksOccupancy Boolean @default(false)
-  rating       Int? // 完成后评价 1-5
-  note         String?
+  blocksOccupancy Boolean   @default(false)
+  rating          Int? // 完成后评价 1-5
+  note            String?
 
   category   WorkOrderCategory @relation(fields: [categoryId], references: [id])
   reportedBy Person?           @relation("Reporter", fields: [reportedById], references: [id])
@@ -640,9 +671,10 @@ model Violation {
   handledAt   DateTime?
   note        String?
 
-  person Person?       @relation(fields: [personId], references: [id])
-  room   Room?         @relation(fields: [roomId], references: [id])
-  type   ViolationType @relation(fields: [typeId], references: [id])
+  person     Person?       @relation(fields: [personId], references: [id])
+  room       Room?         @relation(fields: [roomId], references: [id])
+  type       ViolationType @relation(fields: [typeId], references: [id])
+  complaints Complaint[]
 
   @@index([personId])
   @@index([status])
@@ -741,6 +773,134 @@ model Announcement {
   isActive    Boolean   @default(true)
 
   @@index([publishedAt])
+}
+
+// ============================== 投诉 ==============================
+
+/// 投诉。
+///
+/// **这是一面之词，不是已认定的事实** —— 所以坚决不和 Violation 合并成一张表。
+/// 隔壁半夜喧哗，可能是真的，也可能是两个房间本来就有矛盾在互相举报。
+/// 如果投诉直接变违规扣分，这个功能三个月内就会被当成整人工具用烂。
+///
+/// 完整链路：受理 → 核实 → 认定成立/不成立 → 成立才生成 Violation → 反馈投诉人。
+/// 中间那步认定必须留痕、必须有人签字（handledBy 取自 token）。
+model Complaint {
+  id     Int    @id @default(autoincrement())
+  code   String @unique
+  typeId Int
+
+  /// 投诉人。**匿名投诉这里照样存真人**——
+  /// 「匿名」是对被投诉方和普通宿管匿名，不是对系统匿名。
+  /// 不这样做就无法回访、无法闭环、也识别不了拿匿名刷屏泄愤的人。
+  complainantId Int
+  /// 匿名标记。为 true 时列表和详情默认不返回投诉人信息，
+  /// 需要 complaint:identity 权限才能揭示，且**揭示动作本身写审计**。
+  /// 只在前端藏名字、库里明文躺着的做法等于骗人，传出去这功能就废了。
+  anonymous     Boolean @default(false)
+
+  /// 被投诉的位置：**选房间，不选人**。
+  /// 员工往往不知道隔壁住了谁，也不该逼他去指认具体的人 —— 指名道姓等于把报复风险
+  /// 转嫁给投诉人。系统自己按 Occupancy 反查那间此刻住了谁就够了。
+  targetRoomId  Int?
+  /// 公共区域投诉（过道堆垃圾、洗衣房脏乱）时用楼层 + 区域描述
+  targetFloorId Int?
+  targetArea    String?
+
+  /// 发生时段。**必须和提交时间分开存。**
+  /// 凌晨两点的噪音，员工往往第二天早上才来投诉。宿管拿着「上午 9:03 提交」这条记录，
+  /// 晚上去查什么都查不到。有了发生时段才知道该几点去蹲、将来接了监控该调哪一段。
+  occurredFrom DateTime
+  occurredTo   DateTime?
+
+  description String?
+  /// 提交时的界面语言。中方宿管看到 Bahasa 原文时知道要不要找人翻译
+  lang        String  @default("zh")
+
+  /// NEW 待受理 / ACCEPTED 已受理 / INVESTIGATING 核实中 /
+  /// SUBSTANTIATED 认定成立 / UNSUBSTANTIATED 认定不成立 /
+  /// DUPLICATE 重复投诉 / WITHDRAWN 投诉人撤回 / CLOSED 已归档
+  status   String @default("NEW")
+  /// LOW / NORMAL / HIGH / URGENT。多人反映同一件事会自动升级
+  priority String @default("NORMAL")
+
+  handledBy  String?
+  acceptedAt DateTime?
+  resolvedAt DateTime?
+  closedAt   DateTime?
+
+  /// 认定结论。**成立与否都必须写** —— 这是要反馈给投诉人的内容。
+  /// 不成立而不给说法，下次就没人再投诉了。
+  resolution   String?
+  /// 认定成立后生成的违规记录
+  violationId  Int?
+  /// 被合并到哪条（多人反映同一件事时保留全部原始记录，只是指向主单）
+  mergedIntoId Int?
+
+  /// 投诉人对处理结果的评价，闭环的最后一环
+  rating        Int?
+  ratingComment String?
+
+  submittedAt DateTime @default(now())
+
+  type        ComplaintType         @relation(fields: [typeId], references: [id])
+  complainant Person                @relation("Complainant", fields: [complainantId], references: [id])
+  targetRoom  Room?                 @relation("ComplaintRoom", fields: [targetRoomId], references: [id])
+  targetFloor Floor?                @relation("ComplaintFloor", fields: [targetFloorId], references: [id])
+  violation   Violation?            @relation(fields: [violationId], references: [id])
+  mergedInto  Complaint?            @relation("ComplaintMerge", fields: [mergedIntoId], references: [id])
+  merged      Complaint[]           @relation("ComplaintMerge")
+  events      ComplaintEvent[]
+  attachments ComplaintAttachment[]
+
+  @@index([status])
+  @@index([typeId])
+  @@index([targetRoomId])
+  @@index([complainantId])
+  @@index([submittedAt])
+  @@index([occurredFrom])
+}
+
+/// 投诉处理流水。和 OccupancyEvent 同样的思路：只追加，不覆盖。
+/// 「谁在什么时候把这条投诉判成不成立的」必须永远查得到。
+model ComplaintEvent {
+  id                   Int      @id @default(autoincrement())
+  complaintId          Int
+  /// SUBMIT 提交 / ACCEPT 受理 / INVESTIGATE 开始核实 / RESOLVE 认定 /
+  /// CLOSE 归档 / COMMENT 备注 / MERGE 合并 / WITHDRAW 撤回 /
+  /// REVEAL_IDENTITY 揭示匿名投诉人身份 / RATE 投诉人评价
+  type                 String
+  operator             String   @default("system")
+  note                 String?
+  /// 是否对投诉人可见。内部核实过程（比如「已调取 A-305 门口监控」）不该让投诉人看到
+  visibleToComplainant Boolean  @default(false)
+  createdAt            DateTime @default(now())
+
+  complaint Complaint @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+
+  @@index([complaintId])
+}
+
+/// 投诉附件：照片和录音。
+///
+/// 这两样东西的价值在多国籍园区被严重低估：**它们跨语言**。
+/// 中方宿管不用看懂 Bahasa 也知道过道上堆的是什么，
+/// 核实成本从「派人跑一趟」降到「点开看一眼」。
+model ComplaintAttachment {
+  id           Int      @id @default(autoincrement())
+  complaintId  Int
+  /// PHOTO / AUDIO
+  kind         String
+  mimeType     String
+  size         Int
+  /// 存储文件名（随机），真实路径由服务端拼，不接受前端传路径
+  storedName   String
+  originalName String?
+  uploadedAt   DateTime @default(now())
+
+  complaint Complaint @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+
+  @@index([complaintId])
 }
 
 // ============================== 设备（为后期监控预留） ==============================
@@ -898,18 +1058,18 @@ model AuditLog {
 /// 员工自助端的一次性验证码。
 /// 员工不发账号密码 —— 工号 + 手机验证码，或企业平台扫码（IdentityBinding）。
 model OtpCode {
-  id        Int       @id @default(autoincrement())
+  id         Int       @id @default(autoincrement())
   /// 接收方：手机号；用工号登录时也记下来便于排查
-  target    String
+  target     String
   employeeNo String?
-  code      String
+  code       String
   /// SELF_LOGIN 自助端登录 / BIND 绑定外部身份
-  purpose   String    @default("SELF_LOGIN")
-  personId  Int?
-  attempts  Int       @default(0)
-  expiresAt DateTime
-  usedAt    DateTime?
-  createdAt DateTime  @default(now())
+  purpose    String    @default("SELF_LOGIN")
+  personId   Int?
+  attempts   Int       @default(0)
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime  @default(now())
 
   @@index([target, purpose])
   @@index([expiresAt])

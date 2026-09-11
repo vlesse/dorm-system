@@ -9,22 +9,24 @@
 - [人员](#人员)
 - [入住](#入住)
 - [运营](#运营)
+- [投诉](#投诉)
 - [平台与系统](#平台与系统)
-- [四个关键建模决策](#四个关键建模决策)
+- [五个关键建模决策](#五个关键建模决策)
 - [切换到 PostgreSQL](#切换到-postgresql)
 
 ---
 
 ## 总览
 
-39 张表，分五组：
+42 张表，分五组：
 
 | 组 | 表 |
 |---|---|
-| **字典** | `Nationality` `Department` `PositionLevel` `Shift` `Contractor` `Religion` `RoomType` `ItemType` `ViolationType` `WorkOrderCategory` `SettingItem` |
+| **字典** | `Nationality` `Department` `PositionLevel` `Shift` `Contractor` `Religion` `RoomType` `ItemType` `ViolationType` `WorkOrderCategory` `ComplaintType` `SettingItem` |
 | **空间** | `Site` `Building` `Floor` `Room` `Bed` `Asset` |
 | **人员与入住** | `Person` `Relationship` `Occupancy` `OccupancyEvent` `Request` `IssuedItem` `Deposit` |
 | **运营** | `WorkOrder` `Violation` `Visitor` `Inspection` `InspectionItem` `Announcement` |
+| **投诉** | `Complaint` `ComplaintEvent` `ComplaintAttachment` |
 | **账号与平台** | `Role` `User` `UserBuilding` `IdentityBinding` `Integration` `NotificationTemplate` `Notification` `SyncLog` `AuditLog` `OtpCode` `Device` |
 
 ---
@@ -148,6 +150,79 @@ Announcement   公告，三语，可按楼栋定向
 
 ---
 
+## 投诉
+
+```
+ComplaintType 投诉类别
+ ├─ slaHours        处理时限
+ ├─ allowAnonymous  是否允许匿名（财物丢失 / 肢体冲突强制实名）
+ ├─ routeTo         WARDEN / MANAGER / EHS / HR  ← 见下
+ └─ violationTypeId 认定成立后默认转成哪种违规
+
+Complaint 投诉
+ ├─ complainantId   投诉人。**匿名投诉这里照样存真人**
+ ├─ anonymous       匿名标记
+ ├─ targetRoomId    被投诉的房间（选房号不选人）
+ ├─ targetFloorId + targetArea   公共区域投诉用
+ ├─ occurredFrom / occurredTo    **发生时段**
+ ├─ submittedAt     提交时间 ← 和上面是两回事
+ ├─ status          NEW → ACCEPTED → INVESTIGATING → SUBSTANTIATED / UNSUBSTANTIATED
+ ├─ resolution      认定说明，成立与否都必填
+ ├─ violationId     认定成立后生成的违规记录
+ ├─ mergedIntoId    重复投诉合并到哪条（原始记录不删）
+ └─ rating          投诉人对处理结果的评价
+
+ComplaintEvent 处理流水
+ ├─ type            SUBMIT / ACCEPT / INVESTIGATE / RESOLVE / CLOSE /
+ │                  COMMENT / MERGE / WITHDRAW / REVEAL_IDENTITY / RATE
+ └─ visibleToComplainant   内部核实过程不给投诉人看
+
+ComplaintAttachment 附件
+ └─ kind PHOTO / AUDIO，storedName 由服务端生成
+```
+
+### 为什么 `Complaint` 和 `Violation` 是两张表
+
+**投诉是一面之词，违规是已查实。** 这是 CONTRIBUTING 里的第四条设计原则。
+
+隔壁半夜吵，可能是真的，也可能是两个房间本来就有矛盾在互相举报。
+把两者合表，等于默认「有人说了就是真的」，这个功能三个月内就会被当成整人工具用烂。
+
+分表之后：
+- 投诉可以「认定不成立」，而且这个结论本身也留痕、也要给投诉人一个说法
+- 违规表里每一条都是查实过的，扣分罚款有据可依
+- 从投诉转过来的违规，`description` 和 `evidence` 里带着原投诉编号，能追回去
+
+### 为什么匿名投诉照样存真实 `complainantId`
+
+「匿名」是对**被投诉方和普通宿管**匿名，不是对系统匿名。
+
+不存真人的话：无法回访核实、无法反馈处理结果、无法识别拿匿名刷屏泄愤的人、
+也无法做「不同投诉人数」的聚合 —— 而那正是区分「多人独立反映」和「一个人反复投」的唯一依据。
+
+保护靠三层，全在服务端：
+
+1. 列表和详情接口**永远不返回**匿名投诉的投诉人字段（不看权限）
+2. 要看必须单独调 `/identity`，需要 `complaint:identity` 权限
+3. 每次调用写 `AuditLog` + 一条 `ComplaintEvent`
+
+### 为什么 `routeTo` 在类别上而不是在投诉上
+
+因为**被投诉的可能就是本楼宿管本人**。
+
+「投诉宿舍管理服务」这一类如果落到宿管自己手上，既处理不了，还会把投诉人暴露给他。
+所以派发路径必须由类别决定、不可由提交人临时指定，可见性再按它在服务端收口：
+没有 `complaint:all` 的人只看得到 `routeTo = 'WARDEN'` 的投诉，
+其余的连「存在」都查不到（按 id 直接请求返回 404）。
+
+### 为什么发生时段要和提交时间分开
+
+凌晨两点的噪音，员工第二天早上才来投诉。
+只有 `submittedAt` 的话，宿管手里是「上午 9:03」，晚上去查什么都查不到。
+有了 `occurredFrom` 才知道该几点去蹲、将来接了监控该调哪一段。
+
+---
+
 ## 平台与系统
 
 ```
@@ -168,7 +243,7 @@ OtpCode         员工端验证码，含过期与已用标记
 
 ---
 
-## 四个关键建模决策
+## 五个关键建模决策
 
 ### 1. 床位是最小单位，不是房间
 
@@ -203,7 +278,12 @@ OtpCode         员工端验证码，含过期与已用标记
 - 历史 `Occupancy` 还引用着这些床，删了会断链
 - 将来恢复标准配置时改回来就行，不用重建
 
-### 4. 字典软删除
+### 4. 投诉与违规分表
+
+见上面 [投诉](#投诉)。一句话：**投诉是一面之词，违规是已查实。**
+合表等于默认「有人说了就是真的」。
+
+### 5. 字典软删除
 
 所有字典表（部门、房型、违规类型……）删除时只置 `active = false`。
 

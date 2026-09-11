@@ -1,9 +1,13 @@
 import crypto from 'node:crypto';
+import fsp from 'node:fs/promises';
+import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../db.js';
 import { issueTokenForPerson, requireSelf } from '../services/auth.js';
 import { notify } from '../services/notify.js';
 import { nextCode } from '../services/space.js';
+import { checkAbuse, logEvent, getSetting } from '../services/complaints.js';
+import { UPLOAD_DIR } from './complaints.js';
 import { nextLeaveDue } from './persons.js';
 
 /**
@@ -23,6 +27,10 @@ const OTP_MAX_ATTEMPTS = 5;
 
 /** 员工自助端能提的申请类型 —— 有意不含「入住」，那是宿管的事 */
 const SELF_REQUEST_TYPES = ['TRANSFER', 'CHECKOUT', 'COUPLE_ROOM', 'VISITOR_OVERNIGHT', 'EXTRA_BED'];
+
+/** 附件限制。工地手机随手一拍就是 4MB，前端会先缩到 1280px 再传 */
+const MAX_ATTACHMENT_MB = 4;
+const MAX_ATTACHMENTS = 5;
 
 /** 字典项统一返回三语，前端按当前语言取 —— 后端不做语言判断 */
 const pick3 = (o: any) =>
@@ -172,13 +180,16 @@ export default async function selfRoutes(app: FastifyInstance) {
           .filter((x: any) => x.id !== personId)
       : [];
 
-    const [items, deposits, violations, unread, openWO, pendingReq] = await Promise.all([
+    const [items, deposits, violations, unread, openWO, pendingReq, openComplaints] = await Promise.all([
       prisma.issuedItem.findMany({ where: { personId }, include: { itemType: true }, orderBy: { issuedAt: 'desc' } }),
       prisma.deposit.findMany({ where: { personId, refundedAt: null } }),
       prisma.violation.findMany({ where: { personId, status: { not: 'CLOSED' } }, include: { type: true } }),
       prisma.notification.count({ where: { toPersonId: personId, readAt: null, channel: 'IN_APP' } }),
       prisma.workOrder.count({ where: { reportedById: personId, status: { in: ['NEW', 'ASSIGNED', 'IN_PROGRESS'] } } }),
       prisma.request.count({ where: { personId, status: 'PENDING' } }),
+      prisma.complaint.count({
+        where: { complainantId: personId, status: { in: ['NEW', 'ACCEPTED', 'INVESTIGATING'] } },
+      }),
     ]);
 
     const due = p.positionLevel ? nextLeaveDue(p.cycleStartDate, p.positionLevel.leaveCycleMonths) : null;
@@ -234,7 +245,7 @@ export default async function selfRoutes(app: FastifyInstance) {
         points: v.points, fine: v.fine, occurredAt: v.occurredAt, status: v.status,
       })),
       violationPoints: violations.reduce((s, v) => s + v.points, 0),
-      counts: { unreadNotifications: unread, openWorkOrders: openWO, pendingRequests: pendingReq },
+      counts: { unreadNotifications: unread, openWorkOrders: openWO, pendingRequests: pendingReq, openComplaints },
     };
   });
 
@@ -444,6 +455,282 @@ export default async function selfRoutes(app: FastifyInstance) {
   });
 
   /** 自助端要用的字典（不需要管理端 meta 那么大一坨） */
+
+  // ==================================================== 投诉
+  /**
+   * 员工投诉。
+   *
+   * 三个刻意的设计，每一个都对应一种会让功能失效的现实：
+   *
+   *  1. **位置选房间，不选人。** 员工根本不知道隔壁住了谁，逼他指认等于把报复风险
+   *     转嫁给他。选房号，宿管那边按 Occupancy 反查在住名单就够了。
+   *  2. **发生时段必填，且和提交时间分开。** 凌晨两点的噪音第二天早上才来投诉，
+   *     只记提交时间的话宿管晚上去蹲都不知道蹲几点。
+   *  3. **匿名是对被投诉方匿名，不是对系统匿名。** 库里照样存真人，
+   *     只有 complaint:identity 权限的人能揭示，且揭示写审计。
+   */
+
+  /** 投诉表单需要的东西：类别 + 可选的位置列表 */
+  app.get('/api/self/complaint-options', { preHandler: requireSelf }, async (req) => {
+    const personId = req.auth!.sub;
+    const [types, occ] = await Promise.all([
+      prisma.complaintType.findMany({ where: { isActive: true }, orderBy: { sortOrder: 'asc' } }),
+      prisma.occupancy.findFirst({
+        where: { personId, status: { in: LIVE } },
+        include: { bed: { include: { room: { include: { floor: { include: { building: true } } } } } } },
+      }),
+    ]);
+
+    // 只列出本楼的房间。噪音会穿楼层，所以不限于本层；但跨栋投诉基本不存在，
+    // 列出来只会让选择变难，也容易误选
+    let floors: any[] = [];
+    if (occ) {
+      const buildingId = occ.bed.room.floor.buildingId;
+      const rows = await prisma.floor.findMany({
+        where: { buildingId },
+        include: { rooms: { orderBy: { code: 'asc' } } },  // 功能房（洗衣房、活动室）也可投诉，不过滤
+        orderBy: { level: 'asc' },
+      });
+      floors = rows.map((f) => ({
+        id: f.id, level: f.level, name: f.name,
+        isMine: f.id === occ.bed.room.floorId,
+        rooms: f.rooms.map((r) => ({
+          id: r.id, code: r.code,
+          isMine: r.id === occ.bed.roomId,
+        })),
+      }));
+    }
+
+    return {
+      types: types.map((t) => ({
+        id: t.id, code: t.code,
+        nameZh: t.nameZh, nameId: t.nameId, nameEn: t.nameEn,
+        slaHours: t.slaHours,
+        // 强制实名的类别，前端要把匿名开关禁掉并说明原因
+        allowAnonymous: t.allowAnonymous,
+        routeTo: t.routeTo,
+      })),
+      myRoomId: occ?.bed.roomId ?? null,
+      myFloorId: occ?.bed.room.floorId ?? null,
+      buildingCode: occ?.bed.room.floor.building.code ?? null,
+      floors,
+      maxAttachmentMB: MAX_ATTACHMENT_MB,
+    };
+  });
+
+  app.get('/api/self/complaints', { preHandler: requireSelf }, async (req) => {
+    const rows = await prisma.complaint.findMany({
+      where: { complainantId: req.auth!.sub },
+      include: {
+        type: true,
+        targetRoom: true,
+        targetFloor: { include: { building: true } },
+        attachments: true,
+        // 只把标记为「对投诉人可见」的流水给他看 —— 内部核实过程不外露
+        events: { where: { visibleToComplainant: true }, orderBy: { createdAt: 'asc' } },
+      },
+      orderBy: { submittedAt: 'desc' },
+      take: 50,
+    });
+    return rows.map((c) => ({
+      id: c.id, code: c.code,
+      type: pick3(c.type),
+      status: c.status,
+      anonymous: c.anonymous,
+      location: c.targetRoom
+        ? c.targetRoom.code
+        : c.targetFloor
+          ? `${c.targetFloor.building.code}${c.targetFloor.level}F ${c.targetArea ?? ''}`.trim()
+          : (c.targetArea ?? ''),
+      occurredFrom: c.occurredFrom, occurredTo: c.occurredTo,
+      description: c.description,
+      submittedAt: c.submittedAt,
+      resolvedAt: c.resolvedAt,
+      resolution: c.resolution,
+      rating: c.rating,
+      slaHours: c.type.slaHours,
+      deadline: new Date(c.submittedAt.getTime() + c.type.slaHours * 3600000),
+      attachments: c.attachments.map((a) => ({ id: a.id, kind: a.kind })),
+      events: c.events.map((e) => ({ type: e.type, note: e.note, createdAt: e.createdAt })),
+      canWithdraw: ['NEW', 'ACCEPTED'].includes(c.status),
+      canRate: ['SUBSTANTIATED', 'UNSUBSTANTIATED', 'CLOSED'].includes(c.status) && c.rating == null,
+    }));
+  });
+
+  app.post<{
+    Body: {
+      typeId: number; anonymous?: boolean;
+      targetRoomId?: number | null; targetFloorId?: number | null; targetArea?: string;
+      occurredFrom: string; occurredTo?: string;
+      description?: string;
+    };
+  }>('/api/self/complaints', { preHandler: requireSelf }, async (req, reply) => {
+    const personId = req.auth!.sub;
+    const b = req.body ?? ({} as any);
+
+    if (!b.typeId) return reply.code(400).send({ error: '请选择投诉类别' });
+    if (!b.occurredFrom) return reply.code(400).send({ error: '请选择事情发生的时间' });
+    if (!b.targetRoomId && !b.targetFloorId) {
+      return reply.code(400).send({ error: '请选择投诉的位置（房间或公共区域）' });
+    }
+
+    const type = await prisma.complaintType.findUnique({ where: { id: Number(b.typeId) } });
+    if (!type || !type.isActive) return reply.code(400).send({ error: '投诉类别不存在' });
+
+    // 强制实名的类别不接受匿名。前端也禁了开关，这里是服务端兜底
+    const anonymous = !!b.anonymous && type.allowAnonymous;
+    if (b.anonymous && !type.allowAnonymous) {
+      return reply.code(400).send({
+        error: `「${type.nameZh}」需要实名提交 —— 这类事情要联系你核实取证，匿名就查不下去了`,
+      });
+    }
+
+    const occurredFrom = new Date(b.occurredFrom);
+    if (Number.isNaN(occurredFrom.getTime())) return reply.code(400).send({ error: '发生时间格式不对' });
+    // 未来时间显然是填错了；太久以前的也没法查，直接挡掉省得双方白忙
+    const backDays = await getSetting<number>('complaint.maxBacklogDays', 14);
+    if (occurredFrom.getTime() > Date.now() + 3600000) {
+      return reply.code(400).send({ error: '发生时间不能是将来' });
+    }
+    if (occurredFrom.getTime() < Date.now() - backDays * 86400000) {
+      return reply.code(400).send({ error: `只能投诉最近 ${backDays} 天内发生的事，更早的请直接找宿管` });
+    }
+
+    const abuse = await checkAbuse(personId, b.targetRoomId ? Number(b.targetRoomId) : null);
+    if (!abuse.ok) return reply.code(429).send({ error: abuse.error });
+
+    const person = await prisma.person.findUnique({ where: { id: personId } });
+
+    const c = await prisma.complaint.create({
+      data: {
+        code: await nextCode('CP', 'complaint'),
+        typeId: type.id,
+        complainantId: personId,
+        anonymous,
+        targetRoomId: b.targetRoomId ? Number(b.targetRoomId) : null,
+        targetFloorId: b.targetFloorId ? Number(b.targetFloorId) : null,
+        targetArea: b.targetArea?.slice(0, 100) ?? null,
+        occurredFrom,
+        occurredTo: b.occurredTo ? new Date(b.occurredTo) : null,
+        description: b.description?.slice(0, 500) ?? null,
+        lang: person ? localeOf(person) : 'zh',
+        status: 'NEW',
+      },
+      include: { type: true, targetRoom: true },
+    });
+
+    await logEvent(c.id, 'SUBMIT', anonymous ? '匿名投诉人' : (person?.name ?? '员工'), '投诉已提交', true);
+
+    // 派给谁由类别决定。投诉宿管本人的走 MANAGER —— 绝不能落到被投诉的宿管手上
+    const roleCode = { WARDEN: 'WARDEN', MANAGER: 'DORM_MANAGER', EHS: 'EHS', HR: 'HR' }[type.routeTo] ?? 'WARDEN';
+    await notify('COMPLAINT_SUBMITTED', { roleCode }, {
+      code: c.code,
+      type: type.nameZh,
+      location: c.targetRoom?.code ?? c.targetArea ?? '公共区域',
+      // 通知里绝不带投诉人姓名 —— 匿名与否都不带，避免宿管在群里转发时顺手泄漏
+      when: occurredFrom.toLocaleString('zh-CN'),
+      sla: type.slaHours,
+    }, { type: 'COMPLAINT', id: c.id, linkPath: '/complaints' });
+
+    return { ok: true, id: c.id, code: c.code, anonymous };
+  });
+
+  /**
+   * 上传附件（照片 / 录音）。
+   *
+   * 走 base64 而不是 multipart：少一个依赖，而且前端反正要先把照片缩到 1280px
+   * 再传（工地手机随手一拍就是 4MB，直接传上来这台机器扛不住）。
+   */
+  app.post<{ Params: { id: string }; Body: { kind: string; mimeType: string; dataBase64: string; originalName?: string } }>(
+    '/api/self/complaints/:id/attachments',
+    { preHandler: requireSelf, bodyLimit: (MAX_ATTACHMENT_MB + 2) * 1024 * 1024 },
+    async (req, reply) => {
+      const c = await prisma.complaint.findFirst({
+        where: { id: Number(req.params.id), complainantId: req.auth!.sub },
+      });
+      if (!c) return reply.code(404).send({ error: '投诉不存在' });
+      if (!['NEW', 'ACCEPTED', 'INVESTIGATING'].includes(c.status)) {
+        return reply.code(400).send({ error: '这条投诉已经处理完了，不能再加附件' });
+      }
+
+      const b = req.body ?? ({} as any);
+      const kind = b.kind === 'AUDIO' ? 'AUDIO' : 'PHOTO';
+      const mimeType = String(b.mimeType ?? '');
+      const allowed = kind === 'PHOTO'
+        ? ['image/jpeg', 'image/png', 'image/webp']
+        : ['audio/webm', 'audio/mp4', 'audio/mpeg', 'audio/ogg', 'audio/wav'];
+      if (!allowed.includes(mimeType)) {
+        return reply.code(400).send({ error: `不支持的文件类型：${mimeType}` });
+      }
+      if (!b.dataBase64) return reply.code(400).send({ error: '文件内容为空' });
+
+      const buf = Buffer.from(b.dataBase64, 'base64');
+      if (buf.length === 0) return reply.code(400).send({ error: '文件内容为空' });
+      if (buf.length > MAX_ATTACHMENT_MB * 1024 * 1024) {
+        return reply.code(400).send({ error: `单个附件不能超过 ${MAX_ATTACHMENT_MB} MB` });
+      }
+      const count = await prisma.complaintAttachment.count({ where: { complaintId: c.id } });
+      if (count >= MAX_ATTACHMENTS) {
+        return reply.code(400).send({ error: `最多上传 ${MAX_ATTACHMENTS} 个附件` });
+      }
+
+      const ext = mimeType.split('/')[1]?.replace(/[^a-z0-9]/gi, '') || 'bin';
+      // 文件名由服务端生成，绝不用前端传的名字拼路径
+      const storedName = `${c.id}-${crypto.randomBytes(8).toString('hex')}.${ext}`;
+      await fsp.mkdir(UPLOAD_DIR, { recursive: true });
+      await fsp.writeFile(path.join(UPLOAD_DIR, storedName), buf);
+
+      const att = await prisma.complaintAttachment.create({
+        data: {
+          complaintId: c.id, kind, mimeType, size: buf.length, storedName,
+          originalName: b.originalName?.slice(0, 120) ?? null,
+        },
+      });
+      return { ok: true, id: att.id, kind: att.kind, size: att.size };
+    }
+  );
+
+  /** 撤回。填错了、或者事后自己解决了，得让他撤 —— 不然只能硬着头皮让宿管去查 */
+  app.put<{ Params: { id: string } }>('/api/self/complaints/:id/withdraw',
+    { preHandler: requireSelf },
+    async (req, reply) => {
+      const c = await prisma.complaint.findFirst({
+        where: { id: Number(req.params.id), complainantId: req.auth!.sub },
+      });
+      if (!c) return reply.code(404).send({ error: '投诉不存在' });
+      if (!['NEW', 'ACCEPTED'].includes(c.status)) {
+        return reply.code(400).send({ error: '已经在核实中了，撤不了，请直接联系宿管说明' });
+      }
+      await prisma.complaint.update({
+        where: { id: c.id }, data: { status: 'WITHDRAWN', resolvedAt: new Date() },
+      });
+      await logEvent(c.id, 'WITHDRAW', '投诉人', '投诉人主动撤回', true);
+      return { ok: true };
+    }
+  );
+
+  /** 对处理结果打分。闭环的最后一环 —— 处理得敷衍，这里就会显出来 */
+  app.put<{ Params: { id: string }; Body: { rating: number; comment?: string } }>(
+    '/api/self/complaints/:id/rate',
+    { preHandler: requireSelf },
+    async (req, reply) => {
+      const c = await prisma.complaint.findFirst({
+        where: { id: Number(req.params.id), complainantId: req.auth!.sub },
+      });
+      if (!c) return reply.code(404).send({ error: '投诉不存在' });
+      if (!['SUBSTANTIATED', 'UNSUBSTANTIATED', 'CLOSED'].includes(c.status)) {
+        return reply.code(400).send({ error: '还没有处理结果，暂时不能评价' });
+      }
+      const rating = Math.max(1, Math.min(5, Number(req.body?.rating ?? 5)));
+      await prisma.complaint.update({
+        where: { id: c.id },
+        data: { rating, ratingComment: req.body?.comment?.slice(0, 200) ?? null },
+      });
+      await logEvent(c.id, 'RATE', '投诉人', `评价 ${rating} 分${req.body?.comment ? '：' + req.body.comment : ''}`, false);
+      return { ok: true };
+    }
+  );
+
   app.get('/api/self/meta', { preHandler: requireSelf }, async () => {
     const [categories, requestTypes] = await Promise.all([
       prisma.workOrderCategory.findMany({ where: { isActive: true }, orderBy: { id: 'asc' } }),

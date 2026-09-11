@@ -129,11 +129,12 @@ async function main() {
   console.log('清空旧数据…');
   const order = [
     'auditLog', 'notification', 'notificationTemplate', 'syncLog', 'identityBinding', 'integration',
+    'complaintAttachment', 'complaintEvent', 'complaint',
     'inspectionItem', 'inspection', 'visitor', 'violation', 'workOrder',
     'deposit', 'issuedItem', 'request', 'occupancyEvent', 'occupancy',
     'relationship', 'person', 'asset', 'bed', 'room', 'floor',
     'userBuilding', 'user', 'role', 'building', 'site', 'device',
-    'announcement', 'workOrderCategory', 'violationType', 'itemType',
+    'announcement', 'complaintType', 'workOrderCategory', 'violationType', 'itemType',
     'roomType', 'contractor', 'shift', 'religion', 'positionLevel',
     'department', 'nationality', 'settingItem',
   ];
@@ -291,6 +292,43 @@ async function main() {
     ],
   });
 
+  // 投诉类别。routeTo 是这张表里最关键的字段：
+  // 「投诉宿舍管理服务」必须走 MANAGER，绕开本楼宿管 ——
+  // 否则针对宿管的投诉会落到被投诉人自己手上，既处理不了，还会暴露投诉人。
+  await prisma.complaintType.createMany({
+    data: [
+      { code: 'NOISE', nameZh: '噪音扰民 / 深夜喧哗', nameEn: 'Noise & Late-night Disturbance', nameId: 'Kebisingan / Keributan Malam',
+        slaHours: 12, allowAnonymous: true, routeTo: 'WARDEN', severity: 'MEDIUM', sortOrder: 1 },
+      { code: 'HYGIENE', nameZh: '卫生 / 过道堆放杂物', nameEn: 'Hygiene & Blocked Corridor', nameId: 'Kebersihan / Barang di Koridor',
+        slaHours: 24, allowAnonymous: true, routeTo: 'WARDEN', severity: 'LOW', sortOrder: 2 },
+      { code: 'ALCOHOL', nameZh: '酗酒 / 聚众喧闹', nameEn: 'Drinking & Rowdy Gathering', nameId: 'Mabuk / Berkumpul Ribut',
+        slaHours: 12, allowAnonymous: true, routeTo: 'WARDEN', severity: 'HIGH', sortOrder: 3 },
+      { code: 'SAFETY', nameZh: '安全隐患（私拉电线 / 明火）', nameEn: 'Safety Hazard', nameId: 'Bahaya Keselamatan',
+        // 安全类直达 EHS，不经宿管转手 —— 火灾等不起一层审批
+        slaHours: 4, allowAnonymous: true, routeTo: 'EHS', severity: 'CRITICAL', sortOrder: 4 },
+      { code: 'SMOKING', nameZh: '禁烟区吸烟', nameEn: 'Smoking in No-smoking Area', nameId: 'Merokok di Area Terlarang',
+        slaHours: 24, allowAnonymous: true, routeTo: 'WARDEN', severity: 'MEDIUM', sortOrder: 5 },
+      { code: 'GUEST', nameZh: '私自留宿外人', nameEn: 'Unauthorized Overnight Guest', nameId: 'Menginapkan Tamu Tanpa Izin',
+        slaHours: 24, allowAnonymous: true, routeTo: 'WARDEN', severity: 'HIGH', sortOrder: 6 },
+      { code: 'FACILITY', nameZh: '公共设施被占用 / 损坏', nameEn: 'Shared Facility Misuse', nameId: 'Fasilitas Bersama Disalahgunakan',
+        slaHours: 48, allowAnonymous: true, routeTo: 'WARDEN', severity: 'LOW', sortOrder: 7 },
+      { code: 'THEFT', nameZh: '财物丢失 / 被盗', nameEn: 'Theft or Lost Property', nameId: 'Kehilangan / Pencurian Barang',
+        // 强制实名：要联系失主核实清单、取证、可能报警，匿名就查不下去
+        slaHours: 8, allowAnonymous: false, routeTo: 'MANAGER', severity: 'HIGH', sortOrder: 8 },
+      { code: 'CONFLICT', nameZh: '肢体冲突 / 恐吓威胁', nameEn: 'Physical Conflict or Threat', nameId: 'Perkelahian / Ancaman',
+        // 同上，而且需要当事人愿意出面
+        slaHours: 4, allowAnonymous: false, routeTo: 'MANAGER', severity: 'CRITICAL', sortOrder: 9 },
+      { code: 'DISCRIMINATION', nameZh: '歧视 / 言语侮辱', nameEn: 'Discrimination or Verbal Abuse', nameId: 'Diskriminasi / Pelecehan Verbal',
+        // 多国籍混住场景下真实存在，走主管而不是本楼宿管
+        slaHours: 24, allowAnonymous: true, routeTo: 'MANAGER', severity: 'HIGH', sortOrder: 10 },
+      { code: 'SERVICE', nameZh: '投诉宿舍管理服务', nameEn: 'Complaint about Dorm Management', nameId: 'Keluhan Layanan Pengelola',
+        // 被投诉的可能就是本楼宿管本人，所以这条**必须**绕开 WARDEN
+        slaHours: 24, allowAnonymous: true, routeTo: 'MANAGER', severity: 'MEDIUM', sortOrder: 11 },
+      { code: 'OTHER', nameZh: '其他', nameEn: 'Other', nameId: 'Lainnya',
+        slaHours: 48, allowAnonymous: true, routeTo: 'WARDEN', severity: 'LOW', sortOrder: 99 },
+    ],
+  });
+
   await prisma.settingItem.createMany({
     data: [
       { key: 'allocation.rules', group: 'allocation', description: '排宿规则：OFF 关闭 / SOFT 提醒 / HARD 拦截', value: JSON.stringify(DEFAULT_RULES) },
@@ -301,6 +339,12 @@ async function main() {
       { key: 'violation.pointsThreshold', group: 'violation', description: '违规累计扣分达到多少触发处理', value: '10' },
       { key: 'org.name', group: 'general', description: '组织名称', value: JSON.stringify('青山工业园区（IMIP）') },
       { key: 'locale.default', group: 'general', description: '默认语言 zh / id / en', value: JSON.stringify('zh') },
+      { key: 'complaint.dailyLimit', group: 'complaint', description: '同一人 24 小时内最多提交几条投诉（防刷）', value: '3' },
+      { key: 'complaint.targetCooldownHours', group: 'complaint', description: '同一人对同一房间的投诉冷却小时数', value: '24' },
+      { key: 'complaint.maxBacklogDays', group: 'complaint', description: '最多可投诉多少天以前发生的事', value: '14' },
+      { key: 'complaint.relatedWindowDays', group: 'complaint', description: '判定「反映同一件事」的时间窗（天）', value: '3' },
+      { key: 'complaint.repeatThreshold', group: 'complaint', description: '同一房间被多少个不同的人反映就告警', value: '3' },
+      { key: 'complaint.hotRoomWindowDays', group: 'complaint', description: '重点房间统计窗口（天）', value: '30' },
       { key: 'video.gatewayUrl', group: 'video', description: '视频网关地址（后期接监控时填，如 http://10.0.0.9:1984）', value: JSON.stringify('') },
     ],
   });
@@ -848,6 +892,239 @@ async function main() {
     });
   }
   await createManyChunked(prisma.violation, vioRows);
+
+
+  // ============================== 投诉 ==============================
+  console.log('生成投诉记录…');
+  const complaintTypes = await prisma.complaintType.findMany();
+  const ctByCode: Record<string, any> = Object.fromEntries(complaintTypes.map((t) => [t.code, t]));
+
+  // 投诉人必须是有住宿的人 —— 没住宿的人投诉隔壁没有意义
+  const complainantPool = await prisma.occupancy.findMany({
+    where: { status: { in: ['ACTIVE', 'HELD'] } },
+    select: {
+      personId: true,
+      bed: { select: { roomId: true, room: { select: { floorId: true, code: true } } } },
+    },
+    take: 2000,
+  });
+  const floorRoomMap = new Map<number, { id: number; code: string }[]>();
+  for (const r of await prisma.room.findMany({ select: { id: true, code: true, floorId: true } })) {
+    if (!floorRoomMap.has(r.floorId)) floorRoomMap.set(r.floorId, []);
+    floorRoomMap.get(r.floorId)!.push({ id: r.id, code: r.code });
+  }
+
+  const CP_DESC: Record<string, string[]> = {
+    NOISE: [
+      '隔壁房间凌晨两点还在大声说话唱歌，整层楼都听得到，第二天还要上早班',
+      '楼上半夜搬桌子、跺脚，连着好几天了',
+      '走廊里有人打电话开免提，声音很大，一直到一两点',
+    ],
+    HYGIENE: [
+      '过道里堆了很多纸箱和垃圾袋，味道很大，推车都过不去',
+      '公共卫生间地漏堵了，水漫到走廊上',
+      '洗衣房洗衣机里的衣服放了好几天没人拿，别人没法用',
+    ],
+    ALCOHOL: [
+      '隔壁一群人喝酒到很晚，瓶子摔在地上，还在走廊上吵架',
+      '周末晚上聚在房间里喝酒划拳，声音很大',
+    ],
+    SAFETY: [
+      '看到隔壁房间从走廊接了个插排进去充电动车电池',
+      '有人在房间里用电磁炉煮东西，闻到糊味了',
+    ],
+    SMOKING: ['楼梯间一直有人抽烟，烟味飘进房间', '有人在房间里抽烟，隔壁都是味道'],
+    GUEST: ['隔壁这几天多了两个不认识的人住着，晚上很吵'],
+    FACILITY: ['活动室的椅子被搬走了好几把', '公共热水器坏了没人报修，一直没热水'],
+    THEFT: ['放在阳台上的鞋子不见了', '柜子里的现金少了，锁没有坏的痕迹'],
+    CONFLICT: ['隔壁两个人吵架动手了，把门都踢坏了'],
+    DISCRIMINATION: ['同层有人反复用难听的话骂我们，因为国籍不一样'],
+    SERVICE: [
+      '报修了一个星期没人来，问宿管也不回',
+      '换床位的时候感觉不太公平，想反映一下',
+    ],
+    OTHER: ['其他情况，想反映一下'],
+  };
+  const CP_DESC_ID: Record<string, string[]> = {
+    NOISE: [
+      'Kamar sebelah masih ribut nyanyi jam 2 pagi, besok saya shift pagi',
+      'Lantai atas geser meja dan hentak kaki tengah malam, sudah beberapa hari',
+    ],
+    HYGIENE: [
+      'Koridor penuh kardus dan sampah, baunya menyengat',
+      'Saluran kamar mandi umum tersumbat, air sampai ke koridor',
+    ],
+    ALCOHOL: ['Sebelah minum-minum sampai larut, botol pecah di lantai'],
+    SAFETY: ['Ada yang menarik kabel dari koridor untuk mengisi baterai motor listrik'],
+    SMOKING: ['Ada yang merokok di tangga, asapnya masuk kamar'],
+    GUEST: ['Beberapa hari ini ada orang asing menginap di kamar sebelah'],
+    FACILITY: ['Kursi ruang serbaguna hilang beberapa'],
+    THEFT: ['Sepatu di balkon hilang'],
+    CONFLICT: ['Dua orang di sebelah berkelahi sampai pintu rusak'],
+    DISCRIMINATION: ['Ada yang berulang kali menghina kami karena beda kewarganegaraan'],
+    SERVICE: ['Sudah lapor perbaikan seminggu belum ada yang datang'],
+    OTHER: ['Ingin melaporkan hal lain'],
+  };
+
+  const cpWeights = complaintTypes.map(
+    (t) => [t, t.code === 'NOISE' ? 3.2 : t.code === 'HYGIENE' ? 2.4 : t.code === 'ALCOHOL' ? 1.6 :
+                t.code === 'SMOKING' ? 1.2 : t.code === 'SAFETY' ? 0.9 : t.code === 'SERVICE' ? 0.8 :
+                t.code === 'FACILITY' ? 0.8 : t.code === 'GUEST' ? 0.6 : 0.4] as const
+  );
+
+  const complaintRows: any[] = [];
+  const eventRows: { complaintId: number; type: string; operator: string; note: string; visibleToComplainant: boolean; createdAt: Date }[] = [];
+
+  /** 一条投诉的完整构造。状态越靠后，处理流水越长 */
+  const makeComplaint = (i: number, forcedType?: any, forcedRoomId?: number, forcedPersonId?: number) => {
+    const t = forcedType ?? weighted(cpWeights);
+    const src = complainantPool[forcedPersonId
+      ? complainantPool.findIndex((c) => c.personId === forcedPersonId)
+      : Math.floor(rnd() * complainantPool.length)] ?? pick(complainantPool);
+
+    // 投诉对象：同层的另一个房间（现实里绝大多数投诉是隔壁）
+    const sameFloor = (floorRoomMap.get(src.bed.room.floorId) ?? []).filter((r) => r.id !== src.bed.roomId);
+    const isPublicArea = ['HYGIENE', 'FACILITY'].includes(t.code) && chance(0.45);
+    const targetRoomId = forcedRoomId ?? (isPublicArea ? null : (sameFloor.length > 0 ? pick(sameFloor).id : null));
+    if (!targetRoomId && !isPublicArea) return null;
+
+    // 发生时段：噪音类集中在深夜，其它类白天居多。
+    // 这正是「发生时段」要单独存的原因 —— 提交时间基本都在白天
+    const daysBack = randInt(0, 45);
+    const occurred = daysAgo(daysBack);
+    if (['NOISE', 'ALCOHOL'].includes(t.code)) occurred.setHours(randInt(23, 26) % 24, randInt(0, 59), 0, 0);
+    else occurred.setHours(randInt(8, 21), randInt(0, 59), 0, 0);
+    // 提交时间在发生之后，噪音类往往是第二天早上才来投诉
+    const submitted = new Date(occurred.getTime() + (['NOISE', 'ALCOHOL'].includes(t.code)
+      ? randInt(5, 14) * 3600000
+      : randInt(1, 6) * 3600000));
+    if (submitted.getTime() > Date.now()) submitted.setTime(Date.now() - 3600000);
+
+    const status = weighted([
+      ['NEW', 0.16], ['ACCEPTED', 0.12], ['INVESTIGATING', 0.12],
+      ['SUBSTANTIATED', 0.34], ['UNSUBSTANTIATED', 0.16], ['CLOSED', 0.07], ['WITHDRAWN', 0.03],
+    ] as const);
+
+    const isCN = chance(0.55);
+    const descPool = (isCN ? CP_DESC : CP_DESC_ID)[t.code] ?? CP_DESC[t.code] ?? CP_DESC.OTHER;
+
+    return {
+      code: `CP${String(10001 + i).slice(1)}`,
+      typeId: t.id,
+      complainantId: src.personId,
+      // 匿名占比刻意做得高 —— 这就是半匿名设计要解决的问题：
+      // 强制实名的话这些人根本不会来投诉
+      anonymous: t.allowAnonymous && chance(0.62),
+      targetRoomId,
+      targetFloorId: targetRoomId ? null : src.bed.room.floorId,
+      targetArea: targetRoomId ? null : pick(['走廊', '公共卫生间', '洗衣房', '楼梯间', '活动室']),
+      occurredFrom: occurred,
+      occurredTo: ['NOISE', 'ALCOHOL'].includes(t.code)
+        ? new Date(occurred.getTime() + randInt(1, 3) * 3600000) : null,
+      description: pick(descPool),
+      lang: isCN ? 'zh' : 'id',
+      status,
+      priority: t.severity === 'CRITICAL' ? 'URGENT' : t.severity === 'HIGH' ? 'HIGH' : 'NORMAL',
+      submittedAt: submitted,
+      acceptedAt: status === 'NEW' ? null : new Date(submitted.getTime() + randInt(1, 10) * 3600000),
+      resolvedAt: ['SUBSTANTIATED', 'UNSUBSTANTIATED', 'CLOSED', 'WITHDRAWN'].includes(status)
+        ? new Date(submitted.getTime() + randInt(12, 72) * 3600000) : null,
+      closedAt: status === 'CLOSED' ? new Date(submitted.getTime() + randInt(72, 120) * 3600000) : null,
+      handledBy: status === 'NEW' ? null : pick(['楼栋宿管', '宿舍主管', '安全环保部']),
+      resolution:
+        status === 'SUBSTANTIATED' ? '现场核实属实，已对涉事房间当面提醒并记录违规，会持续回访。'
+        : status === 'UNSUBSTANTIATED' ? '当晚查寝到现场核实，未发现所述情况；也询问了同层其他房间，暂无法证实。如再次发生请随时反映。'
+        : status === 'CLOSED' ? '已处理完毕并归档。'
+        : null,
+      rating: ['SUBSTANTIATED', 'UNSUBSTANTIATED', 'CLOSED'].includes(status) && chance(0.55)
+        ? (status === 'SUBSTANTIATED' ? randInt(4, 5) : randInt(2, 5)) : null,
+    };
+  };
+
+  for (let i = 0; i < 64; i++) {
+    const row = makeComplaint(i);
+    if (row) complaintRows.push(row);
+  }
+
+  // 刻意造两组「多人反映同一件事」—— 演示聚合与优先级升级
+  const hotSource = complainantPool.filter((c) => (floorRoomMap.get(c.bed.room.floorId) ?? []).length > 4);
+  for (const [gi, code] of [[0, 'NOISE'], [1, 'ALCOHOL']] as const) {
+    const seedPerson = hotSource[gi * 37 % hotSource.length];
+    if (!seedPerson) continue;
+    const neighbours = (floorRoomMap.get(seedPerson.bed.room.floorId) ?? []).filter((r) => r.id !== seedPerson.bed.roomId);
+    if (neighbours.length < 4) continue;
+    const target = neighbours[0].id;
+    // 同层四个不同房间的人，在同一个晚上分别反映同一间房
+    const reporters = complainantPool
+      .filter((c) => c.bed.room.floorId === seedPerson.bed.room.floorId && c.bed.roomId !== target)
+      .slice(0, 4);
+    reporters.forEach((rp, k) => {
+      const row = makeComplaint(200 + gi * 10 + k, ctByCode[code], target, rp.personId);
+      if (row) {
+        row.complainantId = rp.personId;
+        row.status = k === 0 ? 'SUBSTANTIATED' : 'ACCEPTED';
+        row.priority = 'HIGH';
+        complaintRows.push(row);
+      }
+    });
+  }
+
+  // 再造一条「投诉宿管本人」的 —— 演示它不会出现在楼栋宿管的列表里
+  {
+    const rp = pick(complainantPool);
+    const row = makeComplaint(900, ctByCode.SERVICE, undefined, rp.personId);
+    if (row) {
+      row.targetRoomId = null;
+      row.targetFloorId = rp.bed.room.floorId;
+      row.targetArea = '宿管室';
+      row.anonymous = true;
+      row.status = 'ACCEPTED';
+      row.description = '报修交上去一个多星期没人来看，去问宿管也不理人，想请上级帮忙看一下。';
+      row.lang = 'zh';
+      complaintRows.push(row);
+    }
+  }
+
+  await createManyChunked(prisma.complaint, complaintRows);
+
+  // 处理流水：每条至少有提交，处理过的补上后续
+  const savedComplaints = await prisma.complaint.findMany({
+    select: { id: true, status: true, submittedAt: true, acceptedAt: true, resolvedAt: true, closedAt: true, handledBy: true, anonymous: true, resolution: true },
+  });
+  for (const c of savedComplaints) {
+    eventRows.push({
+      complaintId: c.id, type: 'SUBMIT',
+      operator: c.anonymous ? '匿名投诉人' : '投诉人',
+      note: '投诉已提交', visibleToComplainant: true, createdAt: c.submittedAt,
+    });
+    if (c.acceptedAt) {
+      eventRows.push({
+        complaintId: c.id, type: 'ACCEPT', operator: c.handledBy ?? '楼栋宿管',
+        note: '已受理，正在安排核实', visibleToComplainant: true, createdAt: c.acceptedAt,
+      });
+      eventRows.push({
+        complaintId: c.id, type: 'INVESTIGATE', operator: c.handledBy ?? '楼栋宿管',
+        // 内部核实过程对投诉人不可见
+        note: pick(['当晚 23:30 到现场查看', '已询问同层其他房间', '已调取该层走廊监控时间段', '已当面询问涉事房间人员']),
+        visibleToComplainant: false,
+        createdAt: new Date(c.acceptedAt.getTime() + randInt(1, 12) * 3600000),
+      });
+    }
+    if (c.resolvedAt && c.resolution) {
+      eventRows.push({
+        complaintId: c.id, type: 'RESOLVE', operator: c.handledBy ?? '宿舍主管',
+        note: `${c.status === 'SUBSTANTIATED' ? '认定成立' : c.status === 'UNSUBSTANTIATED' ? '认定不成立' : '已处理'}：${c.resolution}`,
+        visibleToComplainant: true, createdAt: c.resolvedAt,
+      });
+    }
+    if (c.closedAt) {
+      eventRows.push({
+        complaintId: c.id, type: 'CLOSE', operator: c.handledBy ?? '宿舍主管',
+        note: '已归档', visibleToComplainant: true, createdAt: c.closedAt,
+      });
+    }
+  }
+  await createManyChunked(prisma.complaintEvent, eventRows);
 
   // ============================== 访客 ==============================
   console.log('生成访客登记…');

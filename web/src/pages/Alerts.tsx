@@ -96,6 +96,38 @@ export default function Alerts() {
       ],
     },
     {
+      key: 'complaintOverdue', title: t('alert_complaintOverdue'), rows: a.complaintOverdue, level: 'error',
+      hint: '超过该类别时限还没处理的投诉。投诉晚一天和报修晚一天不一样 —— 这是「反映了没人管」，下次这个人就不会再用这个渠道了。',
+      columns: [
+        { title: '编号', dataIndex: 'code', width: 104 },
+        { title: '类别', dataIndex: 'type', width: 170 },
+        { title: '位置', dataIndex: 'location', width: 160, ellipsis: true },
+        { title: '提交', dataIndex: 'submittedAt', width: 110, render: d },
+        { title: '状态', dataIndex: 'status', width: 96,
+          render: (v: string) => <Tag>{v}</Tag> },
+        { title: '匿名', dataIndex: 'anonymous', width: 64,
+          render: (v: boolean) => (v ? <Tag>匿名</Tag> : '') },
+        { title: '超时', dataIndex: 'overdueHours', width: 100,
+          render: (v: number) => <Tag color="red">{v} 小时</Tag> },
+      ],
+    },
+    {
+      key: 'complaintHotRooms', title: t('alert_complaintHotRooms'), rows: a.complaintHotRooms, level: 'warning',
+      hint: '按「不同投诉人数」判定，不按条数 —— 条数可以被一个人刷出来，多人独立反映才说明真有问题。',
+      columns: [
+        { title: '房间', dataIndex: 'roomCode', width: 100,
+          render: (v: string, r: any) => <b>{r.buildingCode}栋 {v}</b> },
+        { title: '不同投诉人', dataIndex: 'complainants', width: 110,
+          render: (v: number) => <Tag color="red">{v} 人</Tag> },
+        { title: '投诉条数', dataIndex: 'count', width: 90 },
+        { title: '已认定成立', dataIndex: 'substantiated', width: 100 },
+        { title: '涉及类别', dataIndex: 'types', ellipsis: true,
+          render: (v: string[]) => (v ?? []).join('、') },
+        { title: '统计窗口', dataIndex: 'windowDays', width: 90,
+          render: (v: number) => `${v} 天` },
+      ],
+    },
+    {
       key: 'overCapacity', title: t('alert_overCapacity'), rows: a.overCapacity, level: 'error',
       hint: '在住人数超过房间核定人数。可能是私自挤住，也可能是加床后没同步调整核定。',
       columns: [

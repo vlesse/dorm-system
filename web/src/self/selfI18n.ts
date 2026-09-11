@@ -26,6 +26,63 @@ const D: Record<string, L3> = {
   navRepair: ['报修', 'Perbaikan', 'Repairs'],
   navRequest: ['申请', 'Permohonan', 'Requests'],
   navMe: ['我的', 'Saya', 'Me'],
+  navComplaint: ['投诉', 'Pengaduan', 'Complaint'],
+
+  // ---- 投诉 ----
+  newComplaint: ['我要投诉', 'Buat Pengaduan', 'File a Complaint'],
+  myComplaints: ['我的投诉', 'Pengaduan Saya', 'My Complaints'],
+  noComplaints: ['你还没有提交过投诉', 'Belum ada pengaduan', 'No complaints yet'],
+  cpType: ['投诉什么', 'Jenis Pengaduan', 'What is the issue'],
+  cpWhere: ['在哪里', 'Di Mana', 'Where'],
+  cpWhereRoom: ['某个房间', 'Kamar Tertentu', 'A specific room'],
+  cpWherePublic: ['公共区域', 'Area Umum', 'Public area'],
+  cpPickRoom: ['选房号', 'Pilih Kamar', 'Pick a room'],
+  cpPickArea: ['哪个区域', 'Area Mana', 'Which area'],
+  cpRoomHint: [
+    '只要选房号就行，不用知道里面住的是谁',
+    'Cukup pilih nomor kamar, tidak perlu tahu siapa penghuninya',
+    'Just pick the room number — you do not need to know who lives there',
+  ],
+  cpWhen: ['什么时候发生的', 'Kapan Terjadi', 'When did it happen'],
+  cpWhenHint: [
+    '这个很重要 —— 宿管要按这个时间去现场看',
+    'Ini penting — pengelola akan mengecek pada waktu tersebut',
+    'This matters — the warden will check at that time',
+  ],
+  cpLastNight: ['昨晚', 'Tadi Malam', 'Last night'],
+  cpToday: ['今天', 'Hari Ini', 'Today'],
+  cpOther: ['其他时间', 'Waktu Lain', 'Other time'],
+  cpDesc: ['具体说说', 'Jelaskan', 'Describe it'],
+  cpDescHint: [
+    '选填。说清楚点，宿管更好核实',
+    'Opsional. Semakin jelas, semakin mudah diperiksa',
+    'Optional. More detail helps the warden verify',
+  ],
+  cpAnonymous: ['匿名提交', 'Kirim Anonim', 'Submit anonymously'],
+  cpAnonymousOn: [
+    '被投诉的人和本楼宿管都看不到是谁投诉的。只有宿舍主管在需要联系你核实时才能查看，而且查看会被记录。',
+    'Orang yang diadukan dan pengelola gedung tidak akan tahu siapa Anda. Hanya kepala asrama yang bisa melihat bila perlu menghubungi Anda, dan itu tercatat.',
+    'Neither the reported party nor the building warden can see who you are. Only the dorm manager can look it up if they need to contact you, and that is logged.',
+  ],
+  cpAnonymousForced: [
+    '这类投诉需要实名 —— 要联系你核实取证，匿名就查不下去了',
+    'Pengaduan jenis ini harus dengan nama — kami perlu menghubungi Anda untuk verifikasi',
+    'This type requires your name — we need to contact you to verify',
+  ],
+  cpPhoto: ['拍照 / 上传', 'Foto', 'Photo'],
+  cpAudio: ['录一段', 'Rekam Suara', 'Record'],
+  cpRecording: ['录音中…点一下停止', 'Merekam… ketuk untuk berhenti', 'Recording… tap to stop'],
+  cpEvidenceHint: [
+    '拍张照或录段声音最管用 —— 不用写字也能说明问题',
+    'Foto atau rekaman paling membantu — tanpa perlu menulis',
+    'A photo or recording helps most — no writing needed',
+  ],
+  cpWithdraw: ['撤回', 'Tarik', 'Withdraw'],
+  cpWithdrawConfirm: ['确定撤回这条投诉？', 'Tarik pengaduan ini?', 'Withdraw this complaint?'],
+  cpResult: ['处理结果', 'Hasil', 'Result'],
+  cpRateHint: ['处理得怎么样？', 'Bagaimana penanganannya?', 'How was it handled?'],
+  cpSubmitted: ['已提交，宿管会尽快核实', 'Terkirim, akan segera diperiksa', 'Submitted, it will be checked soon'],
+  cpPrivacyTitle: ['投诉不会泄漏给被投诉的人', 'Pengaduan Anda dirahasiakan', 'Your complaint stays confidential'],
 
   myRoom: ['我的住宿', 'Kamar Saya', 'My Room'],
   building: ['楼栋', 'Gedung', 'Building'],
@@ -107,6 +164,18 @@ const STATUS: Record<string, L3> = {
   CLOSED: ['已关闭', 'Ditutup', 'Closed'],
 };
 
+/** 投诉状态。NEW / CLOSED 在报修里是「待派工 / 已关闭」，这里是「待受理 / 已归档」，所以单独一份 */
+const CP_STATUS: Record<string, L3> = {
+  NEW: ['待受理', 'Menunggu Diterima', 'Pending'],
+  ACCEPTED: ['已受理', 'Diterima', 'Accepted'],
+  INVESTIGATING: ['核实中', 'Sedang Diperiksa', 'Investigating'],
+  SUBSTANTIATED: ['已查实处理', 'Terbukti & Ditangani', 'Confirmed'],
+  UNSUBSTANTIATED: ['核实后未认定', 'Tidak Terbukti', 'Not Confirmed'],
+  DUPLICATE: ['与他人反映重复', 'Duplikat', 'Duplicate'],
+  WITHDRAWN: ['已撤回', 'Ditarik', 'Withdrawn'],
+  CLOSED: ['已归档', 'Selesai', 'Closed'],
+};
+
 const IDX = { zh: 0, id: 1, en: 2 } as const;
 
 export function useSelfT() {
@@ -116,6 +185,7 @@ export function useSelfT() {
     t: (k: string) => D[k]?.[i] ?? k,
     reqType: (k: string) => REQ_TYPE[k]?.[i] ?? k,
     status: (k: string) => STATUS[k]?.[i] ?? k,
+    cpStatus: (k: string) => CP_STATUS[k]?.[i] ?? k,
     lang,
     /** 后端字典项按当前语言取名。兼容两种形状：{zh,id,en} 和 {nameZh,nameId,nameEn} */
     dict: (o: any) => {
