@@ -40,7 +40,11 @@ dorm-system/
 ├── server/
 │   ├── prisma/
 │   │   ├── schema.prisma        数据模型，全中文注释，改这里之后要 db:push
-│   │   ├── seed.ts              业务模拟数据（楼栋 / 人员 / 工单 / 违规 …）
+│   │   ├── seed.ts              种子入口，按预设编排下面几个模块
+│   │   ├── seed-lib.ts          共享随机数流与工具（跨模块必须共用同一个 rnd）
+│   │   ├── seed-dict.ts         通用配置字典 —— 开通任何客户都要跑
+│   │   ├── seed-imip.ts         IMIP 的部门与 8 栋楼结构 —— 某一个客户自己的数据
+│   │   ├── seed-demo.ts         模拟运营数据（人员 / 排宿 / 工单 / 违规 …）
 │   │   └── seed-platform.ts     账号 / 角色 / 集成占位 / 通知模板
 │   └── src/
 │       ├── index.ts             Fastify 入口 + 全局鉴权钩子 + 路由注册
@@ -85,7 +89,8 @@ dorm-system/
 | `npm run dev` | 同时起后端 3101 和前端 5183 |
 | `npm run dev:api` / `npm run dev:web` | 只起一边 |
 | `npm run db:push` | 把 `schema.prisma` 同步到数据库并重新生成 client |
-| `npm run db:seed` | 清空业务数据并重新生成模拟数据 |
+| `npm run db:seed` | 清空业务数据并重新生成模拟数据（字典 + IMIP 楼栋 + 2500 人） |
+| `npm run db:seed:blank -w server` | 只写通用字典 + 一个随机密码的管理员，**开通新客户用这个** |
 | `npm run db:reset -w server` | 强制重建库 + seed（**会丢数据**） |
 | `npm run build -w web` | 构建前端到 `web/dist` |
 | `npx tsc -p server/tsconfig.json` | 编译后端到 `server/dist` |
@@ -311,11 +316,14 @@ antd 的 `<App>` 包裹层默认没有高度，会让 `height: 100%` 的布局�
 <details>
 <summary><b>改模拟数据的规模</b></summary>
 
-`server/prisma/seed.ts` 顶部的常量：楼栋数、每栋层数、房型分布比例、人数、
-国籍比例、配偶对数、故意制造的异常数据条数。改完 `npm run db:seed`。
+规模比例在 `server/prisma/seed-demo.ts` 顶部（人数、配偶对数、入住率、
+故意制造的异常数据条数），楼栋结构在 `seed-imip.ts` 的 `BUILDINGS`。
+改完 `npm run db:seed`。
 
 seed 是**确定性的**（固定随机种子），同样的参数每次生成同样的数据，
-方便对着截图排查问题。
+方便对着截图排查问题。随机数流 `rnd` 是 `seed-lib.ts` 里的模块级单例，
+`seed-imip` 和 `seed-demo` 共用同一个流——**各模块自己 new 一个会让序列错位，
+生成的数据就对不上了**。
 </details>
 
 ---

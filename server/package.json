@@ -8,6 +8,7 @@
     "start": "node dist/index.js",
     "db:push": "prisma db push --skip-generate && prisma generate",
     "db:seed": "tsx prisma/seed.ts",
+    "db:seed:blank": "tsx prisma/seed.ts --blank",
     "db:reset": "prisma db push --force-reset --skip-generate && prisma generate && tsx prisma/seed.ts"
   },
   "dependencies": {

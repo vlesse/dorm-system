@@ -9,3 +9,4 @@ server/prisma/*.db*
 DEPLOY.local.md
 data/uploads/
 server/data/
+*.local.md
