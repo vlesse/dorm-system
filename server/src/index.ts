@@ -14,7 +14,12 @@ import selfRoutes from './routes/self.js';
 import importRoutes from './routes/imports.js';
 import complaintRoutes from './routes/complaints.js';
 
-const app = Fastify({ logger: { transport: undefined, level: 'warn' } });
+// 生产环境前面是本机 nginx：只信任来自 loopback 的 X-Forwarded-For。
+// 不开的话 req.ip 永远是 127.0.0.1 —— 审计日志里的 IP 全是假的，登录限流也没法按 IP 算
+const app = Fastify({
+  logger: { transport: undefined, level: 'warn' },
+  trustProxy: process.env.TRUST_PROXY ?? 'loopback',
+});
 
 await app.register(cors, { origin: true });
 

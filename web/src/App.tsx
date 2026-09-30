@@ -8,7 +8,7 @@ import {
 } from '@ant-design/icons';
 import { Routes, Route, useNavigate, useLocation, Navigate } from 'react-router-dom';
 import { api } from './api';
-import { useT, useLang, LANGS } from './i18n';
+import { useT, useFmt, useLang, LANGS } from './i18n';
 import { MetaContext } from './meta';
 import { useAuth } from './auth';
 import NotificationBell from './components/NotificationBell';
@@ -34,6 +34,7 @@ const { Header, Sider, Content } = Layout;
 
 export default function App() {
   const t = useT();
+  const f = useFmt();
   const { lang, setLang } = useLang();
   const nav = useNavigate();
   const loc = useLocation();
@@ -98,8 +99,8 @@ export default function App() {
     },
     {
       label: t('grp_system'), items: [
-        { key: '/import', icon: <ImportOutlined />, label: '批量导入', perm: 'person:read' },
-        { key: '/integrations', icon: <ApiOutlined />, label: '集成对接', perm: 'config:read' },
+        { key: '/import', icon: <ImportOutlined />, label: t('nav_import'), perm: 'person:read' },
+        { key: '/integrations', icon: <ApiOutlined />, label: t('nav_integrations'), perm: 'config:read' },
         { key: '/settings', icon: <SettingOutlined />, label: t('nav_settings'), perm: 'config:read' },
       ],
     },
@@ -138,9 +139,9 @@ export default function App() {
             <Dropdown
               menu={{
                 items: [
-                  { key: 'pwd', icon: <KeyOutlined />, label: '修改密码', onClick: () => setPwdOpen(true) },
+                  { key: 'pwd', icon: <KeyOutlined />, label: t('change_password'), onClick: () => setPwdOpen(true) },
                   { type: 'divider' },
-                  { key: 'out', icon: <LogoutOutlined />, label: '退出登录', danger: true, onClick: () => logout() },
+                  { key: 'out', icon: <LogoutOutlined />, label: t('logout'), danger: true, onClick: () => logout() },
                 ],
               }}
             >
@@ -151,7 +152,7 @@ export default function App() {
                   <span style={{ fontSize: 11, color: 'rgba(255,255,255,.55)' }}>
                     {user.roleName}
                     {!user.scopeAll && user.buildings.length > 0 &&
-                      ` · 仅 ${user.buildings.map((b) => b.code).join('/')} 栋`}
+                      f('scope_only', { b: user.buildings.map((b) => b.code).join('/') })}
                   </span>
                 </Space>
               </Space>
@@ -164,8 +165,14 @@ export default function App() {
             {!user.scopeAll && user.buildings.length > 0 && (
               <div style={{ padding: '10px 12px 0' }}>
                 <Tag color="orange" style={{ fontSize: 11 }}>
-                  数据范围：{user.buildings.map((b) => b.code).join('、')} 栋
+                  {f('scope_tag', { b: user.buildings.map((b) => b.code).join(', ') })}
                 </Tag>
+              </div>
+            )}
+            {/* 楼栋范围失败即收紧：没 space:all 又没分楼栋的账号什么都看不到 —— 要说清楚原因，别让人以为系统坏了 */}
+            {!user.scopeAll && user.buildings.length === 0 && (
+              <div style={{ padding: '10px 12px 0' }}>
+                <Tag color="red" style={{ fontSize: 11, whiteSpace: 'normal' }}>{t('scope_none')}</Tag>
               </div>
             )}
             <Menu
@@ -201,7 +208,7 @@ export default function App() {
       </Layout>
 
       <Modal
-        open={pwdOpen} title="修改密码"
+        open={pwdOpen} title={t('change_password')}
         closable={!user.mustChangePassword}
         maskClosable={!user.mustChangePassword}
         cancelButtonProps={{ style: user.mustChangePassword ? { display: 'none' } : undefined }}
@@ -210,7 +217,7 @@ export default function App() {
           const v = await form.validateFields();
           try {
             await api.changePassword(v.oldPassword, v.newPassword);
-            message.success('密码已修改');
+            message.success(t('pwd_changed'));
             setPwdOpen(false);
             form.resetFields();
             await refresh();
@@ -219,14 +226,14 @@ export default function App() {
       >
         {user.mustChangePassword && (
           <Typography.Paragraph type="warning" style={{ fontSize: 12 }}>
-            这是初始密码，首次登录必须修改后才能继续使用。
+            {t('pwd_initial')}
           </Typography.Paragraph>
         )}
         <Form form={form} layout="vertical">
-          <Form.Item name="oldPassword" label="原密码" rules={[{ required: true }]}>
+          <Form.Item name="oldPassword" label={t('pwd_old')} rules={[{ required: true }]}>
             <Input.Password autoComplete="current-password" />
           </Form.Item>
-          <Form.Item name="newPassword" label="新密码" rules={[{ required: true, min: 6, message: '至少 6 位' }]}>
+          <Form.Item name="newPassword" label={t('pwd_new')} rules={[{ required: true, min: 6, message: t('pwd_min') }]}>
             <Input.Password autoComplete="new-password" />
           </Form.Item>
         </Form>

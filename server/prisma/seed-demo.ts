@@ -613,6 +613,24 @@ export async function seedDemo(prisma: PrismaClient, dict: Dict, space: Space) {
     };
   };
 
+  /**
+   * 事后改状态时，把和状态绑定的字段一起改掉。以前直接改 row.status，
+   * 原状态生成的认定说明 / 认定时间 / 评分还留着 —— 演示数据里出现「已受理却有认定结论」的单子
+   */
+  const forceStatus = (row: any, status: string) => {
+    row.status = status;
+    const base = row.submittedAt.getTime();
+    row.acceptedAt = status === 'NEW' ? null : (row.acceptedAt ?? new Date(base + 3 * 3600000));
+    const resolved = ['SUBSTANTIATED', 'UNSUBSTANTIATED', 'CLOSED', 'WITHDRAWN'].includes(status);
+    row.resolvedAt = resolved ? (row.resolvedAt ?? new Date(base + 24 * 3600000)) : null;
+    row.closedAt = status === 'CLOSED' ? (row.closedAt ?? new Date(base + 96 * 3600000)) : null;
+    row.handledBy = status === 'NEW' ? null : (row.handledBy ?? '楼栋宿管');
+    row.resolution = status === 'SUBSTANTIATED' ? '现场核实属实，已对涉事房间当面提醒并记录违规，会持续回访。' : status === 'UNSUBSTANTIATED'
+      ? '当晚查寝到现场核实，未发现所述情况；也询问了同层其他房间，暂无法证实。如再次发生请随时反映。'
+      : status === 'CLOSED' ? '已处理完毕并归档。' : null;
+    if (!['SUBSTANTIATED', 'UNSUBSTANTIATED', 'CLOSED'].includes(status)) row.rating = null;
+  };
+
   for (let i = 0; i < 64; i++) {
     const row = makeComplaint(i);
     if (row) complaintRows.push(row);
@@ -634,7 +652,7 @@ export async function seedDemo(prisma: PrismaClient, dict: Dict, space: Space) {
       const row = makeComplaint(200 + gi * 10 + k, ctByCode[code], target, rp.personId);
       if (row) {
         row.complainantId = rp.personId;
-        row.status = k === 0 ? 'SUBSTANTIATED' : 'ACCEPTED';
+        forceStatus(row, k === 0 ? 'SUBSTANTIATED' : 'ACCEPTED');
         row.priority = 'HIGH';
         complaintRows.push(row);
       }
@@ -650,7 +668,7 @@ export async function seedDemo(prisma: PrismaClient, dict: Dict, space: Space) {
       row.targetFloorId = rp.bed.room.floorId;
       row.targetArea = '宿管室';
       row.anonymous = true;
-      row.status = 'ACCEPTED';
+      forceStatus(row, 'ACCEPTED');
       row.description = '报修交上去一个多星期没人来看，去问宿管也不理人，想请上级帮忙看一下。';
       row.lang = 'zh';
       complaintRows.push(row);
@@ -674,12 +692,21 @@ export async function seedDemo(prisma: PrismaClient, dict: Dict, space: Space) {
         complaintId: c.id, type: 'ACCEPT', operator: c.handledBy ?? '楼栋宿管',
         note: '已受理，正在安排核实', visibleToComplainant: true, createdAt: c.acceptedAt,
       });
+    }
+    // 只有真的走到核实这一步的才有核实流水：「已受理」还没开始核实，撤回只能发生在核实之前
+    if (c.acceptedAt && !['ACCEPTED', 'WITHDRAWN'].includes(c.status)) {
       eventRows.push({
         complaintId: c.id, type: 'INVESTIGATE', operator: c.handledBy ?? '楼栋宿管',
         // 内部核实过程对投诉人不可见
         note: pick(['当晚 23:30 到现场查看', '已询问同层其他房间', '已调取该层走廊监控时间段', '已当面询问涉事房间人员']),
         visibleToComplainant: false,
         createdAt: new Date(c.acceptedAt.getTime() + randInt(1, 12) * 3600000),
+      });
+    }
+    if (c.status === 'WITHDRAWN' && c.resolvedAt) {
+      eventRows.push({
+        complaintId: c.id, type: 'WITHDRAW', operator: '投诉人',
+        note: '投诉人主动撤回', visibleToComplainant: true, createdAt: c.resolvedAt,
       });
     }
     if (c.resolvedAt && c.resolution) {

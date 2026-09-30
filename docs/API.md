@@ -121,6 +121,14 @@ Content-Type: application/json
 { "rows": [...], "total": 2558, "page": 1, "pageSize": 50 }
 ```
 
+### 登录限流
+
+`POST /api/auth/login` 只数失败：同一账号 15 分钟内失败 5 次、或同一 IP 失败 30 次，锁 15 分钟，
+返回 `429` 和 `Retry-After`。锁住时不做密码校验（scrypt 的开销本身就是攻击面）。
+员工自助端验证码另有限制：同一工号每小时最多申请 5 次，单个验证码最多试 5 次。
+
+限流按真实客户端 IP 算，所以服务端信任本机 nginx 传来的 `X-Forwarded-For`（`TRUST_PROXY`，默认 `loopback`）。
+
 ### 楼栋数据范围
 
 所有列表、详情、统计和写接口都会按当前用户的楼栋范围过滤 / 校验。

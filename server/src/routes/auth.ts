@@ -15,6 +15,44 @@ import {
  *
  * 员工本人不发账号密码，只走企业平台身份或手机验证码（IdentityBinding.personId）。
  */
+/**
+ * 登录失败限流。
+ *
+ * 演示站密码公开，但代码是开源的，照搬去投产的人不会记得自己加。scrypt 每次校验
+ * 要吃几十毫秒 CPU，不限的话既能暴力猜密码，也能把这台小机器打满。
+ *
+ * 两道闸，都只数失败：
+ *   同一账号 15 分钟内失败 5 次 → 锁 15 分钟（挡定向猜某个账号）
+ *   同一 IP  15 分钟内失败 30 次 → 锁 15 分钟（挡换着账号撞库）
+ * 放内存里：单进程部署，重启清零可以接受，不值得为它引一个 Redis。
+ */
+const WINDOW_MS = 15 * 60 * 1000;
+const MAX_PER_USER = 5;
+const MAX_PER_IP = 30;
+const failures = new Map<string, number[]>();
+
+function recentFailures(key: string) {
+  const now = Date.now();
+  const list = (failures.get(key) ?? []).filter((t) => now - t < WINDOW_MS);
+  if (list.length) failures.set(key, list); else failures.delete(key);
+  return list;
+}
+function lockedFor(username: string, ip: string): number {
+  const u = recentFailures(`u:${username.toLowerCase()}`);
+  const i = recentFailures(`ip:${ip}`);
+  const until = Math.max(
+    u.length >= MAX_PER_USER ? u[u.length - MAX_PER_USER] + WINDOW_MS : 0,
+    i.length >= MAX_PER_IP ? i[i.length - MAX_PER_IP] + WINDOW_MS : 0,
+  );
+  return Math.max(0, until - Date.now());
+}
+function recordFailure(username: string, ip: string) {
+  const now = Date.now();
+  for (const k of [`u:${username.toLowerCase()}`, `ip:${ip}`]) failures.set(k, [...recentFailures(k), now]);
+  // 防止被随机账号名撑爆内存
+  if (failures.size > 20000) failures.clear();
+}
+
 export default async function authRoutes(app: FastifyInstance) {
   /** 登录页需要知道有哪些可用的登录方式 */
   app.get('/api/auth/methods', async () => {
@@ -37,14 +75,24 @@ export default async function authRoutes(app: FastifyInstance) {
     if (typeof username !== 'string' || typeof password !== 'string' || !username || !password)
       return reply.code(400).send({ error: '请输入账号和密码' });
 
+    // 先看锁，锁住时连密码都不校验 —— 否则 scrypt 的开销照样吃满
+    const wait = lockedFor(username, req.ip);
+    if (wait > 0) {
+      const minutes = Math.ceil(wait / 60000);
+      reply.header('Retry-After', Math.ceil(wait / 1000));
+      return reply.code(429).send({ error: `登录失败次数过多，请 ${minutes} 分钟后再试`, retryAfterMinutes: minutes });
+    }
+
     const user = await prisma.user.findUnique({ where: { username } });
-    // 用户不存在和密码错误给同一个提示，避免account枚举
+    // 用户不存在和密码错误给同一个提示，避免账号枚举
     if (!user || !user.isActive || !verifyPassword(password, user.passwordHash)) {
+      recordFailure(username, req.ip);
       await prisma.auditLog.create({
         data: { username, action: 'LOGIN_FAILED', detail: '账号或密码错误', ip: req.ip },
       });
       return reply.code(401).send({ error: '账号或密码不正确' });
     }
+    failures.delete(`u:${username.toLowerCase()}`);
 
     const issued = await issueTokenForUser(user.id);
     if (!issued) return reply.code(401).send({ error: '账号已停用' });
