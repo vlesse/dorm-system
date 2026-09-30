@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../db.js';
 import { requirePerm, audit, actor } from '../services/auth.js';
-import { bedLayoutFor } from '../services/space.js';
+import { bedLayoutFor, PERSON_INCLUDE, nextCode } from '../services/space.js';
 import { notify } from '../services/notify.js';
 
 /**
@@ -188,6 +188,8 @@ export default async function importRoutes(app: FastifyInstance) {
       }
 
       const rows = req.body?.rows ?? [];
+      if (!Array.isArray(rows) || rows.length === 0) return reply.code(400).send({ error: '没有可导入的数据' });
+      if (rows.length > 5000) return reply.code(400).send({ error: '单次最多导入 5000 行，请分批' });
       const onlyValid = req.body?.onlyValid !== false;
       const results = await validateRows(def, rows);
       const bad = results.filter((r) => r.status === 'ERROR');
@@ -266,6 +268,13 @@ async function validateRows(def: ImportType, rows: Record<string, any>[]): Promi
 
   const out: RowResult[] = [];
   const seen = new Set<string>();
+  /**
+   * 本批次里已经分出去的床 + 分进每个房间的人。
+   * 以前每行只对着数据库校验，同一个房间的六行都不填床位时，六行都会挑到「第一张空床」，
+   * 提交后一张床上六条在住记录；同房间的性别 / 国籍规则也只对比库里的人，看不到同批次的室友。
+   */
+  const batchBeds = new Set<number>();
+  const batchPeople = new Map<number, { bedId: number; person: any }[]>();
 
   for (const [i, raw] of rows.entries()) {
     const line = i + 2; // 表头占第 1 行
@@ -437,7 +446,14 @@ async function validateRows(def: ImportType, rows: Record<string, any>[]): Promi
             where: { code: roomCode },
             include: {
               roomType: true, floor: { include: { building: true } },
-              beds: { include: { occupancies: { where: { status: { in: ['ACTIVE', 'HELD', 'RESERVED'] } } } } },
+              beds: {
+                include: {
+                  occupancies: {
+                    where: { status: { in: ['ACTIVE', 'HELD', 'RESERVED'] } },
+                    include: { person: { include: PERSON_INCLUDE } },
+                  },
+                },
+              },
             },
           })
         : null;
@@ -445,11 +461,12 @@ async function validateRows(def: ImportType, rows: Record<string, any>[]): Promi
 
       let bed: any = null;
       if (room) {
-        const free = room.beds.filter((b) => b.status === 'FREE');
+        const free = room.beds.filter((b) => b.status === 'FREE' && !batchBeds.has(b.id));
         const want = val('bedLabel');
         if (want) {
           bed = room.beds.find((b) => b.label === want || b.code === want);
           if (!bed) errors.push(`房间 ${roomCode} 里没有床位「${want}」`);
+          else if (batchBeds.has(bed.id)) errors.push(`床位「${want}」已被本次导入的其它行占用`);
           else if (bed.status !== 'FREE') errors.push(`床位「${want}」当前状态为 ${bed.status}，不可分配`);
         } else {
           bed = free[0];
@@ -464,11 +481,19 @@ async function validateRows(def: ImportType, rows: Record<string, any>[]): Promi
         const { loadRules } = await import('../db.js');
         const rules = await loadRules();
         const spouseIds = await spouseIdsOf(person.id);
-        const checks = evaluateAssignment(
-          personToLike(person, spouseIds),
-          roomToContext({ ...room, beds: room.beds.map((b) => ({ ...b, occupancies: [] })) }, bed),
-          rules
-        );
+        // 库里的室友 + 本批次先分进来的室友，一起参与规则校验
+        const pending = batchPeople.get(room.id) ?? [];
+        const ctxRoom = {
+          ...room,
+          beds: room.beds.map((b) => ({
+            ...b,
+            occupancies: [
+              ...b.occupancies,
+              ...pending.filter((x) => x.bedId === b.id).map((x) => ({ person: x.person })),
+            ],
+          })),
+        };
+        const checks = evaluateAssignment(personToLike(person, spouseIds), roomToContext(ctxRoom, bed), rules);
         const { blockers, warnings: warn } = splitChecks(checks);
         for (const b of blockers) errors.push(b.message);
         for (const w of warn) warnings.push(w.message);
@@ -481,6 +506,10 @@ async function validateRows(def: ImportType, rows: Record<string, any>[]): Promi
       }
       data.personId = person?.id;
       data.bedId = bed?.id;
+      if (errors.length === 0 && bed && room && person) {
+        batchBeds.add(bed.id);
+        batchPeople.set(room.id, [...(batchPeople.get(room.id) ?? []), { bedId: bed.id, person }]);
+      }
       if (val('note')) data.note = val('note');
 
       out.push({
@@ -512,14 +541,14 @@ async function applyRow(def: ImportType, r: RowResult): Promise<'CREATED' | 'UPD
         if (occ) {
           await prisma.request.create({
             data: {
-              code: `REQ${Date.now().toString().slice(-8)}${exists.id % 100}`,
+              code: await nextCode('REQ', 'request'),
               type: 'CHECKOUT', personId: exists.id,
               reason: '批量导入标记离职，需办理退宿并清点物品',
               status: 'APPROVED', submittedBy: 'import:manual',
               approvedBy: 'system', approvedAt: new Date(),
             },
           });
-          await notify('RESIGNED_CHECKOUT', { roleCode: 'WARDEN' }, {
+          await notify('RESIGNED_CHECKOUT', { roleCode: 'WARDEN', buildingId: occ.bed.room.floorId ? (await prisma.floor.findUnique({ where: { id: occ.bed.room.floorId } }))?.buildingId : null }, {
             name: exists.name, employeeNo: exists.employeeNo, room: occ.bed.room.code,
           }, { type: 'PERSON', id: exists.id, linkPath: '/alerts' });
         }
@@ -592,6 +621,9 @@ async function applyRow(def: ImportType, r: RowResult): Promise<'CREATED' | 'UPD
 
   if (def.type === 'occupancy') {
     await prisma.$transaction(async (tx) => {
+      // 预检到提交之间床可能被别人排掉了，这里再抢一次
+      const r = await tx.bed.updateMany({ where: { id: d.bedId, status: 'FREE' }, data: { status: 'OCCUPIED' } });
+      if (r.count === 0) throw new Error('这张床在预检之后已被占用');
       await tx.occupancy.create({
         data: {
           bedId: d.bedId, personId: d.personId, status: 'ACTIVE',
@@ -599,7 +631,6 @@ async function applyRow(def: ImportType, r: RowResult): Promise<'CREATED' | 'UPD
           assignedBy: 'import:manual', note: d.note ?? null,
         },
       });
-      await tx.bed.update({ where: { id: d.bedId }, data: { status: 'OCCUPIED' } });
       await tx.occupancyEvent.create({
         data: { type: 'CHECKIN', personId: d.personId, bedId: d.bedId, operator: 'import:manual', note: '批量导入' },
       });

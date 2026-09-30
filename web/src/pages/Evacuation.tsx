@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Card, Space, Alert, Row, Col, Statistic, Table, Tag, Collapse, Button, Select, Typography } from 'antd';
+import { Card, Space, Alert, Row, Col, Statistic, Table, Tag, Collapse, Button, Select, Typography, message as antdMessage } from 'antd';
 import { PrinterOutlined, DownloadOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { useT } from '../i18n';
@@ -39,7 +39,8 @@ export default function Evacuation() {
               onChange={setBuildingId}
               options={data.map((b) => ({ value: b.id, label: `${b.code}栋` }))} />
             <Button size="small" icon={<PrinterOutlined />} onClick={() => window.print()}>打印</Button>
-            <Button size="small" icon={<DownloadOutlined />} href={api.rosterCsvUrl(buildingId ? { buildingId } : {})}>CSV</Button>
+            <Button size="small" icon={<DownloadOutlined />}
+              onClick={() => api.downloadRosterCsv(buildingId ? { buildingId } : {}).catch((e) => antdMessage.error(e.message))}>CSV</Button>
           </Card>
         </Col>
       </Row>

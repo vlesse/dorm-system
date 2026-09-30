@@ -14,7 +14,8 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(BASE + path, {
     ...init,
     headers: {
-      'Content-Type': 'application/json',
+      // 只有带 body 才声明 JSON：DELETE / 无参 PUT 带着这个头，Fastify 会以「JSON body 为空」直接回 400
+      ...(init?.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init?.headers ?? {}),
     },
@@ -24,7 +25,9 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     onUnauthenticated?.();
   }
   const text = await res.text();
-  const body = text ? JSON.parse(text) : null;
+  // nginx 502 / 504 回的是 HTML，直接 JSON.parse 会把真正的错误变成一句看不懂的 SyntaxError
+  let body: any = null;
+  try { body = text ? JSON.parse(text) : null; } catch { body = { error: `服务暂时不可用（HTTP ${res.status}）` }; }
   if (!res.ok) {
     const err = new Error(body?.error ?? res.statusText) as Error & { status: number; body: any };
     err.status = res.status;
@@ -32,6 +35,33 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     throw err;
   }
   return body as T;
+}
+
+/**
+ * 需要登录的文件（CSV、投诉照片 / 录音）不能直接写成 <a href> / <img src>：
+ * 浏览器直接请求时不会带 Authorization 头，服务端一律 401。
+ * 这里带上 token 取回 Blob，再交给调用方。
+ */
+export async function fetchBlob(path: string): Promise<Blob> {
+  const token = getToken();
+  const res = await fetch(BASE + path, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  if (res.status === 401) { setToken(null); onUnauthenticated?.(); }
+  if (!res.ok) {
+    let msg = res.statusText;
+    try { msg = (await res.json()).error ?? msg; } catch { /* 非 JSON */ }
+    throw new Error(msg);
+  }
+  return res.blob();
+}
+
+/** 带登录态下载文件 */
+export async function download(path: string, filename: string) {
+  const blob = await fetchBlob(path);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
 const qs = (o: Record<string, any>) => {
@@ -89,7 +119,8 @@ export const api = {
 
   // 报表
   roster: (q: Record<string, any>) => req<any[]>(`/roster${qs(q)}`),
-  rosterCsvUrl: (q: Record<string, any>) => `${BASE}/roster.csv${qs(q)}`,
+  downloadRosterCsv: (q: Record<string, any>) =>
+    download(`/roster.csv${qs(q)}`, `roster-${new Date().toISOString().slice(0, 10)}.csv`),
   evacuation: (q: Record<string, any> = {}) => req<any[]>(`/evacuation${qs(q)}`),
 
   // 运营

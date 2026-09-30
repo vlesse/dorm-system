@@ -41,6 +41,23 @@ app.addHook('onRequest', async (req, reply) => {
   }
 });
 
+/**
+ * 统一错误出口。Fastify 默认会把异常的 message 原样回给前端 ——
+ * Prisma 的报错里带着源码路径、SQL 约束名，这些不该出现在浏览器里。
+ * 4xx（参数校验等）照常返回；5xx 只回一句通用提示，细节进日志。
+ */
+app.setErrorHandler((err: any, req, reply) => {
+  const status = err.statusCode && err.statusCode < 500 ? err.statusCode : 500;
+  if (status >= 500) {
+    req.log.error(err);
+    // 外键 / 唯一约束冲突基本都是传了不存在的 id 或重复编号，按 400 回更准确
+    if (err.code === 'P2003' || err.code === 'P2025') return reply.code(400).send({ error: '引用的记录不存在' });
+    if (err.code === 'P2002') return reply.code(409).send({ error: '记录重复，请刷新后重试' });
+    return reply.code(500).send({ error: '服务器内部错误，请稍后再试' });
+  }
+  return reply.code(status).send({ error: err.message, code: err.code });
+});
+
 app.get('/api/health', async () => ({ ok: true, ts: new Date().toISOString() }));
 
 await app.register(authRoutes);

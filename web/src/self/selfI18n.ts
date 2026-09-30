@@ -60,9 +60,9 @@ const D: Record<string, L3> = {
   ],
   cpAnonymous: ['匿名提交', 'Kirim Anonim', 'Submit anonymously'],
   cpAnonymousOn: [
-    '被投诉的人和本楼宿管都看不到是谁投诉的。只有宿舍主管在需要联系你核实时才能查看，而且查看会被记录。',
-    'Orang yang diadukan dan pengelola gedung tidak akan tahu siapa Anda. Hanya kepala asrama yang bisa melihat bila perlu menghubungi Anda, dan itu tercatat.',
-    'Neither the reported party nor the building warden can see who you are. Only the dorm manager can look it up if they need to contact you, and that is logged.',
+    '被投诉的人和本楼宿管都看不到是谁投诉的。只有宿舍主管或人事在需要联系你核实时才能查看，而且每次查看都会被记录。',
+    'Orang yang diadukan dan pengelola gedung tidak akan tahu siapa Anda. Hanya kepala asrama atau SDM yang bisa melihat bila perlu menghubungi Anda, dan setiap kali dilihat akan tercatat.',
+    'Neither the reported party nor the building warden can see who you are. Only the dorm manager or HR can look it up if they need to contact you, and every lookup is logged.',
   ],
   cpAnonymousForced: [
     '这类投诉需要实名 —— 要联系你核实取证，匿名就查不下去了',

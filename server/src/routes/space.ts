@@ -1,7 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '../db.js';
 import { ROOM_INCLUDE, serializeRoom } from '../services/space.js';
-import { buildingScope, requirePerm, actor, audit } from '../services/auth.js';
+import { buildingScope, requirePerm, actor, audit, hasPermission, roomInScope, floorInScope, inBuildingScope } from '../services/auth.js';
+
+const NOT_IN_SCOPE = { error: '不存在或不在你的管辖范围内' };
 import QRCode from 'qrcode';
 
 const LIVE = ['ACTIVE', 'HELD', 'RESERVED'];
@@ -92,7 +94,7 @@ export default async function spaceRoutes(app: FastifyInstance) {
         rooms: { orderBy: { code: 'asc' }, include: ROOM_INCLUDE },
       },
     });
-    if (!floor) return reply.code(404).send({ error: 'floor not found' });
+    if (!floor || !inBuildingScope(req, floor.buildingId)) return reply.code(404).send(NOT_IN_SCOPE);
     return {
       id: floor.id, level: floor.level, name: floor.name,
       nationalityId: floor.nationalityId, genderPolicy: floor.genderPolicy, note: floor.note,
@@ -110,7 +112,7 @@ export default async function spaceRoutes(app: FastifyInstance) {
       where: { id: Number(req.params.id) },
       include: ROOM_INCLUDE,
     });
-    if (!room) return reply.code(404).send({ error: 'room not found' });
+    if (!room || !inBuildingScope(req, room.floor.buildingId)) return reply.code(404).send(NOT_IN_SCOPE);
     const workOrders = await prisma.workOrder.findMany({
       where: { scopeType: 'ROOM', scopeId: room.id },
       include: { category: true }, orderBy: { reportedAt: 'desc' }, take: 10,
@@ -128,8 +130,10 @@ export default async function spaceRoutes(app: FastifyInstance) {
   app.put<{ Params: { id: string }; Body: { nationalityId?: string | null; genderPolicy?: string | null; note?: string | null } }>(
     '/api/space/floors/:id',
     { preHandler: requirePerm('space:write') },
-    async (req) => {
-      const { nationalityId, genderPolicy, note } = req.body;
+    async (req, reply) => {
+      if (!(await floorInScope(req, Number(req.params.id)))) return reply.code(404).send(NOT_IN_SCOPE);
+      const { nationalityId, genderPolicy, note } = req.body ?? ({} as any);
+      await audit(req, 'FLOOR_UPDATE', { targetType: 'Floor', targetId: Number(req.params.id), detail: JSON.stringify(req.body).slice(0, 200) });
       return prisma.floor.update({
         where: { id: Number(req.params.id) },
         data: {
@@ -143,8 +147,10 @@ export default async function spaceRoutes(app: FastifyInstance) {
 
   app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/space/buildings/:id',
     { preHandler: requirePerm('space:write') },
-    async (req) => {
-    const b = req.body;
+    async (req, reply) => {
+    const b = req.body ?? {};
+    if (!inBuildingScope(req, Number(req.params.id))) return reply.code(404).send(NOT_IN_SCOPE);
+    await audit(req, 'BUILDING_UPDATE', { targetType: 'Building', targetId: Number(req.params.id), detail: JSON.stringify(b).slice(0, 200) });
     return prisma.building.update({
       where: { id: Number(req.params.id) },
       data: {
@@ -162,7 +168,15 @@ export default async function spaceRoutes(app: FastifyInstance) {
     { preHandler: requirePerm('space:room') },
     async (req, reply) => {
     const id = Number(req.params.id);
-    const b = req.body;
+    const b = req.body ?? {};
+    if (!(await roomInScope(req, id))) return reply.code(404).send(NOT_IN_SCOPE);
+    // 房型、性别、国籍分区决定排宿规则，是主管的事（space:write）；宿管只能管状态和设施
+    const ZONING = ['roomTypeId', 'genderPolicy', 'nationalityId'];
+    if (ZONING.some((k) => k in b) && !hasPermission(req.auth!.perms, 'space:write')) {
+      return reply.code(403).send({ error: '修改房型 / 性别 / 国籍分区需要「space:write」权限', code: 'FORBIDDEN' });
+    }
+    if (b.status && !['AVAILABLE', 'MAINTENANCE', 'QUARANTINE', 'LOCKED', 'CLEANING'].includes(b.status))
+      return reply.code(400).send({ error: `未知房间状态 ${b.status}` });
     if (b.status && ['MAINTENANCE', 'LOCKED', 'QUARANTINE'].includes(b.status)) {
       const live = await prisma.occupancy.count({ where: { status: { in: LIVE }, bed: { roomId: id } } });
       if (live > 0) return reply.code(400).send({ error: `房间内仍有 ${live} 人未退宿，不能置为「${b.status}」` });
@@ -172,7 +186,9 @@ export default async function spaceRoutes(app: FastifyInstance) {
       'hasAC', 'hasBathroom', 'hasWaterHeater', 'hasBalcony', 'orientation', 'area', 'name']) {
       if (k in b) data[k] = b[k];
     }
-    return prisma.room.update({ where: { id }, data });
+    const updated = await prisma.room.update({ where: { id }, data });
+    await audit(req, 'ROOM_UPDATE', { targetType: 'Room', targetId: id, detail: JSON.stringify(data).slice(0, 200) });
+    return updated;
   });
 
   /**
@@ -185,7 +201,10 @@ export default async function spaceRoutes(app: FastifyInstance) {
     { preHandler: requirePerm('space:capacity') },
     async (req, reply) => {
       const id = Number(req.params.id);
-      const { capacity, deratedReason } = req.body;
+      if (!(await roomInScope(req, id))) return reply.code(404).send(NOT_IN_SCOPE);
+      const capacity = Math.floor(Number(req.body?.capacity));
+      const deratedReason = req.body?.deratedReason;
+      if (!Number.isFinite(capacity)) return reply.code(400).send({ error: '核定人数必须是数字' });
       const room = await prisma.room.findUnique({
         where: { id },
         include: { roomType: true, beds: { include: { occupancies: { where: { status: { in: LIVE } } } } } },
@@ -238,7 +257,8 @@ export default async function spaceRoutes(app: FastifyInstance) {
   );
 
   /** 楼层平面：一屏看完这层每间房的类型、核定、在住 */
-  app.get<{ Params: { id: string } }>('/api/space/floors/:id/summary', async (req) => {
+  app.get<{ Params: { id: string } }>('/api/space/floors/:id/summary', async (req, reply) => {
+    if (!(await floorInScope(req, Number(req.params.id)))) return reply.code(404).send(NOT_IN_SCOPE);
     const rooms = await prisma.room.findMany({
       where: { floorId: Number(req.params.id) },
       include: { roomType: true, beds: { include: { occupancies: { where: { status: { in: LIVE } } } } } },
@@ -265,7 +285,7 @@ export default async function spaceRoutes(app: FastifyInstance) {
         where: { id: Number(req.params.id) },
         include: { floor: { include: { building: true } }, roomType: true },
       });
-      if (!room) return reply.code(404).send({ error: '房间不存在' });
+      if (!room || !inBuildingScope(req, room.floor.buildingId)) return reply.code(404).send(NOT_IN_SCOPE);
 
       const setting = await prisma.settingItem.findUnique({ where: { key: 'self.baseUrl' } });
       let base = '';
@@ -291,7 +311,8 @@ export default async function spaceRoutes(app: FastifyInstance) {
   );
 
   /** 整层楼的门牌二维码，批量打印用 */
-  app.get<{ Params: { id: string } }>('/api/space/floors/:id/qrcodes', async (req) => {
+  app.get<{ Params: { id: string } }>('/api/space/floors/:id/qrcodes', async (req, reply) => {
+    if (!(await floorInScope(req, Number(req.params.id)))) return reply.code(404).send(NOT_IN_SCOPE);
     const rooms = await prisma.room.findMany({
       where: { floorId: Number(req.params.id) },
       include: { roomType: true, floor: { include: { building: true } } },

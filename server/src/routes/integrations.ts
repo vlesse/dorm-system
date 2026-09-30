@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
-import { prisma } from '../db.js';
-import { requireAuth, requirePerm, audit } from '../services/auth.js';
+import { prisma, paging } from '../db.js';
+import { requireAuth, requirePerm, audit, hasPermission } from '../services/auth.js';
 import { notify, flushOutbox } from '../services/notify.js';
+import { nextCode } from '../services/space.js';
 
 /**
  * 集成对接 + 通知中心。
@@ -116,6 +117,9 @@ const maskConfig = (provider: string, raw: string) => {
   return out;
 };
 
+/** 收件人就是投诉人的模板 —— 列表里不能露出收件人，否则匿名投诉等于公开 */
+const COMPLAINANT_TEMPLATES = ['COMPLAINT_ACCEPTED', 'COMPLAINT_RESOLVED'];
+
 export default async function integrationRoutes(app: FastifyInstance) {
   // ==================================================== 集成配置
   app.get('/api/integrations', { preHandler: requireAuth }, async () => {
@@ -205,14 +209,23 @@ export default async function integrationRoutes(app: FastifyInstance) {
   );
 
   // ==================================================== 通知中心
+  /**
+   * 通知列表。
+   *
+   * 这张表里有两类东西绝对不能给普通账号看：
+   *   1. 员工登录验证码（SELF_OTP 的正文就是验证码）—— 看到了就能冒充任何员工登录
+   *   2. 发给投诉人的投诉进度（「你的投诉 CPxxx 已受理」）—— 收件人就是投诉人，
+   *      匿名投诉的身份等于直接摊在这里，还绕过了 /identity 的审计
+   * 所以：不是 mine=true 的查询只有 integration:write（管理员）能用，而且这两类照样打码。
+   */
   app.get<{ Querystring: Record<string, string | undefined> }>(
     '/api/notifications',
     { preHandler: requireAuth },
     async (req) => {
-      const page = Number(req.query.page ?? 1);
-      const pageSize = Math.min(Number(req.query.pageSize ?? 30), 200);
+      const { page, pageSize } = paging(req.query, 30);
+      const canSeeAll = hasPermission(req.auth!.perms, 'integration:write');
       const where: any = {};
-      if (req.query.mine === 'true') where.toUserId = req.auth!.sub;
+      if (req.query.mine === 'true' || !canSeeAll) where.toUserId = req.auth!.sub;
       if (req.query.channel) where.channel = req.query.channel;
       if (req.query.status) where.status = req.query.status;
       if (req.query.unread === 'true') where.readAt = null;
@@ -232,21 +245,29 @@ export default async function integrationRoutes(app: FastifyInstance) {
       ]);
       return {
         total, page, pageSize, unread,
-        rows: rows.map((n) => ({
-          id: n.id, channel: n.channel, title: n.title, body: n.body, linkPath: n.linkPath,
-          status: n.status, error: n.error, locale: n.locale,
-          createdAt: n.createdAt, sentAt: n.sentAt, readAt: n.readAt,
-          refType: n.refType, refId: n.refId, templateCode: n.templateCode,
-          to: n.toUser?.name ?? n.toPerson?.name ?? n.toAddress ?? '—',
-          toDetail: n.toUser?.username ?? n.toPerson?.employeeNo ?? null,
-        })),
+        rows: rows.map((n) => {
+          const hideRecipient = !!n.toPersonId && COMPLAINANT_TEMPLATES.includes(n.templateCode ?? '');
+          const mask = (t: string) => (n.templateCode === 'SELF_OTP' ? t.replace(/\d{4,8}/g, '******') : t);
+          return {
+            id: n.id, channel: n.channel, title: mask(n.title),
+            body: hideRecipient ? '（发给投诉人的通知，内容不在此展示）' : mask(n.body),
+            linkPath: n.linkPath,
+            status: n.status, error: n.error, locale: n.locale,
+            createdAt: n.createdAt, sentAt: n.sentAt, readAt: n.readAt,
+            refType: n.refType, refId: hideRecipient ? null : n.refId, templateCode: n.templateCode,
+            to: hideRecipient ? '投诉人（已隐藏）' : (n.toUser?.name ?? n.toPerson?.name ?? n.toAddress ?? '—'),
+            toDetail: hideRecipient ? null : (n.toUser?.username ?? n.toPerson?.employeeNo ?? null),
+          };
+        }),
       };
     }
   );
 
-  app.put<{ Params: { id: string } }>('/api/notifications/:id/read', { preHandler: requireAuth }, async (req) =>
-    prisma.notification.update({ where: { id: Number(req.params.id) }, data: { readAt: new Date() } })
-  );
+  app.put<{ Params: { id: string } }>('/api/notifications/:id/read', { preHandler: requireAuth }, async (req, reply) => {
+    const n = await prisma.notification.findUnique({ where: { id: Number(req.params.id) } });
+    if (!n || n.toUserId !== req.auth!.sub) return reply.code(404).send({ error: '通知不存在' });
+    return prisma.notification.update({ where: { id: n.id }, data: { readAt: new Date() } });
+  });
 
   app.put('/api/notifications/read-all', { preHandler: requireAuth }, async (req) => {
     const r = await prisma.notification.updateMany({
@@ -287,11 +308,20 @@ export default async function integrationRoutes(app: FastifyInstance) {
   app.put<{ Params: { id: string }; Body: Record<string, any> }>(
     '/api/notification-templates/:id',
     { preHandler: requirePerm('integration:write') },
-    async (req) => prisma.notificationTemplate.update({ where: { id: Number(req.params.id) }, data: req.body })
+    async (req) => {
+      // 只放行文案和渠道字段，模板 code 是业务代码里写死引用的，改了触发点就找不到模板了
+      const data: any = {};
+      for (const k of ['titleZh', 'titleEn', 'titleId', 'bodyZh', 'bodyEn', 'bodyId', 'channels', 'enabled']) {
+        if (k in (req.body ?? {})) data[k] = req.body[k];
+      }
+      const updated = await prisma.notificationTemplate.update({ where: { id: Number(req.params.id) }, data });
+      await audit(req, 'TEMPLATE_UPDATE', { targetType: 'NotificationTemplate', targetId: updated.id, detail: updated.code });
+      return updated;
+    }
   );
 
   // ==================================================== 同步日志
-  app.get('/api/sync-logs', { preHandler: requireAuth }, async () =>
+  app.get('/api/sync-logs', { preHandler: requirePerm('person:read') }, async () =>
     prisma.syncLog.findMany({ orderBy: { startedAt: 'desc' }, take: 50 })
   );
 
@@ -345,14 +375,14 @@ export default async function integrationRoutes(app: FastifyInstance) {
               deactivated++;
               await prisma.request.create({
                 data: {
-                  code: `REQ${Date.now().toString().slice(-8)}${exists.id % 100}`,
+                  code: await nextCode('REQ', 'request'),
                   type: 'CHECKOUT', personId: exists.id,
                   reason: `${provider} 同步：人员已离职，需办理退宿并清点物品`,
                   status: 'APPROVED', submittedBy: `sync:${provider}`,
                   approvedBy: 'system', approvedAt: new Date(),
                 },
               });
-              await notify('RESIGNED_CHECKOUT', { roleCode: 'WARDEN' }, {
+              await notify('RESIGNED_CHECKOUT', { roleCode: 'WARDEN', buildingId: (await prisma.floor.findUnique({ where: { id: occ.bed.room.floorId } }))?.buildingId }, {
                 name: exists.name, employeeNo: exists.employeeNo, room: occ.bed.room.code,
               }, { type: 'PERSON', id: exists.id, linkPath: '/alerts' });
             }

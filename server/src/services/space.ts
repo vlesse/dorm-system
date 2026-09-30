@@ -216,8 +216,12 @@ export async function nextCode(prefix: string, model: 'workOrder' | 'violation' 
   const d = new Date();
   const day = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
   const head = `${prefix}${day}`;
-  const count = await (prisma as any)[model].count({ where: { code: { startsWith: head } } });
-  return `${head}-${String(count + 1).padStart(4, '0')}`;
+  // 取当天最大编号 +1，而不是 count+1：一旦有旧格式编号混进来（或以后允许删除），count 会撞上已有编号
+  const last = await (prisma as any)[model].findFirst({
+    where: { code: { startsWith: `${head}-` } }, orderBy: { code: 'desc' }, select: { code: true },
+  });
+  const n = last ? (parseInt(String(last.code).slice(head.length + 1), 10) || 0) + 1 : 1;
+  return `${head}-${String(n).padStart(4, '0')}`;
 }
 
 /**

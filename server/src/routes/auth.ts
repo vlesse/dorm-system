@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { prisma } from '../db.js';
+import { prisma, paging } from '../db.js';
 import {
   hashPassword, verifyPassword, issueTokenForUser, requireAuth, requirePerm,
   audit, actor, hasPermission,
@@ -33,7 +33,9 @@ export default async function authRoutes(app: FastifyInstance) {
 
   app.post<{ Body: { username: string; password: string } }>('/api/auth/login', async (req, reply) => {
     const { username, password } = req.body ?? ({} as any);
-    if (!username || !password) return reply.code(400).send({ error: '请输入账号和密码' });
+    // 类型也要卡：传个对象进来，Prisma 会直接抛 500
+    if (typeof username !== 'string' || typeof password !== 'string' || !username || !password)
+      return reply.code(400).send({ error: '请输入账号和密码' });
 
     const user = await prisma.user.findUnique({ where: { username } });
     // 用户不存在和密码错误给同一个提示，避免account枚举
@@ -84,7 +86,8 @@ export default async function authRoutes(app: FastifyInstance) {
       mustChangePassword: user?.mustChangePassword ?? false,
       /** 空数组 = 可看全部楼栋 */
       buildings: (user?.buildings ?? []).map((b) => ({ id: b.building.id, code: b.building.code, name: b.building.name })),
-      scopeAll: hasPermission(a.perms, 'space:all') || (user?.buildings.length ?? 0) === 0,
+      // 没有 space:all 又没分楼栋 = 什么都看不到（和 buildingScope 同一口径），不是「看全部」
+      scopeAll: hasPermission(a.perms, 'space:all'),
       identities: (user?.identities ?? []).map((i) => ({ provider: i.provider, displayName: i.displayName })),
     };
   });
@@ -94,12 +97,12 @@ export default async function authRoutes(app: FastifyInstance) {
     { preHandler: requireAuth },
     async (req, reply) => {
       const { oldPassword, newPassword } = req.body ?? ({} as any);
-      if (!newPassword || newPassword.length < 6)
+      if (typeof newPassword !== 'string' || newPassword.length < 6)
         return reply.code(400).send({ error: '新密码至少 6 位' });
       const user = await prisma.user.findUnique({ where: { id: req.auth!.sub } });
       if (!user) return reply.code(404).send({ error: '账号不存在' });
       // 首次登录强制改密时，旧密码仍需校验（初始密码由管理员告知）
-      if (!verifyPassword(oldPassword, user.passwordHash))
+      if (typeof oldPassword !== 'string' || !verifyPassword(oldPassword, user.passwordHash))
         return reply.code(400).send({ error: '原密码不正确' });
       await prisma.user.update({
         where: { id: user.id },
@@ -137,6 +140,7 @@ export default async function authRoutes(app: FastifyInstance) {
     if (!b.username || !b.name || !b.roleId) return reply.code(400).send({ error: '账号、姓名、角色必填' });
     const exists = await prisma.user.findUnique({ where: { username: b.username } });
     if (exists) return reply.code(400).send({ error: '账号已存在' });
+    if (!(await prisma.role.findUnique({ where: { id: Number(b.roleId) } }))) return reply.code(400).send({ error: '角色不存在' });
     const user = await prisma.user.create({
       data: {
         username: b.username, name: b.name, roleId: Number(b.roleId), phone: b.phone,
@@ -151,18 +155,24 @@ export default async function authRoutes(app: FastifyInstance) {
       });
     }
     await audit(req, 'USER_CREATE', { targetType: 'User', targetId: user.id, detail: b.username });
-    return user;
+    return publicUser(user);
   });
 
   app.put<{ Params: { id: string }; Body: Record<string, any> }>(
     '/api/users/:id',
     { preHandler: requirePerm('user:write') },
-    async (req) => {
+    async (req, reply) => {
       const id = Number(req.params.id);
-      const b = req.body;
+      const b = req.body ?? {};
+      if (!(await prisma.user.findUnique({ where: { id } }))) return reply.code(404).send({ error: '账号不存在' });
+      // 别把自己锁在门外：不能停用自己
+      if (id === req.auth!.sub && b.isActive === false) return reply.code(400).send({ error: '不能停用当前登录的账号' });
       const data: any = {};
       for (const k of ['name', 'phone', 'isActive', 'locale']) if (k in b) data[k] = b[k];
-      if (b.roleId) data.roleId = Number(b.roleId);
+      if (b.roleId) {
+        if (!(await prisma.role.findUnique({ where: { id: Number(b.roleId) } }))) return reply.code(400).send({ error: '角色不存在' });
+        data.roleId = Number(b.roleId);
+      }
       if (b.password) { data.passwordHash = hashPassword(b.password); data.mustChangePassword = true; }
       const user = await prisma.user.update({ where: { id }, data });
       if (Array.isArray(b.buildingIds)) {
@@ -174,7 +184,7 @@ export default async function authRoutes(app: FastifyInstance) {
         }
       }
       await audit(req, 'USER_UPDATE', { targetType: 'User', targetId: id, detail: b.password ? '重置密码' : undefined });
-      return user;
+      return publicUser(user);
     }
   );
 
@@ -183,8 +193,7 @@ export default async function authRoutes(app: FastifyInstance) {
     '/api/audit-logs',
     { preHandler: requirePerm('audit:read') },
     async (req) => {
-      const page = Number(req.query.page ?? 1);
-      const pageSize = Math.min(Number(req.query.pageSize ?? 30), 200);
+      const { page, pageSize } = paging(req.query, 30);
       const where: any = {};
       if (req.query.action) where.action = req.query.action;
       if (req.query.username) where.username = { contains: req.query.username };
@@ -198,4 +207,10 @@ export default async function authRoutes(app: FastifyInstance) {
       return { total, page, pageSize, rows };
     }
   );
+}
+
+/** 账号对象回给前端前去掉密码哈希 —— 哪怕是加盐的 scrypt，也不该离开服务端 */
+function publicUser<T extends { passwordHash?: string | null }>(u: T) {
+  const { passwordHash, ...rest } = u;
+  return { ...rest, hasPassword: !!passwordHash };
 }

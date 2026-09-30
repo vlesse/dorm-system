@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import { prisma } from '../db.js';
+import { prisma, paging } from '../db.js';
 import { nextCode } from '../services/space.js';
-import { requirePerm, actor, audit } from '../services/auth.js';
+import { requirePerm, actor, audit, roomInScope, floorInScope } from '../services/auth.js';
 import { notify } from '../services/notify.js';
 import {
   COMPLAINT_INCLUDE, OPEN_STATUS, complaintScope, canRevealIdentity,
@@ -26,8 +26,7 @@ export default async function complaintRoutes(app: FastifyInstance) {
   app.get<{ Querystring: Record<string, string | undefined> }>('/api/complaints',
     { preHandler: requirePerm('complaint:read') },
     async (req) => {
-      const page = Number(req.query.page ?? 1);
-      const pageSize = Math.min(Number(req.query.pageSize ?? 20), 200);
+      const { page, pageSize } = paging(req.query, 20);
       const where: any = { AND: [complaintScope(req)] };
 
       if (req.query.status) where.AND.push({ status: req.query.status });
@@ -129,7 +128,7 @@ export default async function complaintRoutes(app: FastifyInstance) {
         occupants,
         attachments: c.attachments.map((a) => ({
           id: a.id, kind: a.kind, mimeType: a.mimeType, size: a.size,
-          originalName: a.originalName, uploadedAt: a.uploadedAt,
+          originalName: c.anonymous ? null : a.originalName, uploadedAt: a.uploadedAt,
           url: `/api/complaints/${c.id}/attachments/${a.id}`,
         })),
       };
@@ -148,8 +147,9 @@ export default async function complaintRoutes(app: FastifyInstance) {
     { preHandler: requirePerm('complaint:identity') },
     async (req, reply) => {
       const id = Number(req.params.id);
-      const c = await prisma.complaint.findUnique({
-        where: { id },
+      // 能揭示身份也得先在处理范围内 —— 权限点和数据范围是两层，缺一不可
+      const c = await prisma.complaint.findFirst({
+        where: { AND: [{ id }, complaintScope(req)] },
         include: {
           complainant: {
             include: {
@@ -192,6 +192,16 @@ export default async function complaintRoutes(app: FastifyInstance) {
       }
       const type = await prisma.complaintType.findUnique({ where: { id: Number(b.typeId) } });
       if (!type) return reply.code(400).send({ error: '投诉类别不存在' });
+      const complainant = await prisma.person.findUnique({ where: { id: Number(b.complainantId) } });
+      if (!complainant) return reply.code(400).send({ error: '投诉人不存在' });
+      const occurredFrom = new Date(b.occurredFrom);
+      if (Number.isNaN(occurredFrom.getTime())) return reply.code(400).send({ error: '发生时间格式不对' });
+      if (!b.targetRoomId && !b.targetFloorId) return reply.code(400).send({ error: '请选择投诉的位置' });
+      // 代录也不能录到自己管不着的楼 —— 录进去之后自己反而看不到，等于丢单
+      if (b.targetRoomId && !(await roomInScope(req, Number(b.targetRoomId))))
+        return reply.code(400).send({ error: '房间不存在或不在你的管辖范围内' });
+      if (!b.targetRoomId && b.targetFloorId && !(await floorInScope(req, Number(b.targetFloorId))))
+        return reply.code(400).send({ error: '楼层不存在或不在你的管辖范围内' });
 
       const c = await prisma.complaint.create({
         data: {
@@ -200,13 +210,13 @@ export default async function complaintRoutes(app: FastifyInstance) {
           complainantId: Number(b.complainantId),
           anonymous: false,
           targetRoomId: b.targetRoomId ? Number(b.targetRoomId) : null,
-          targetFloorId: b.targetFloorId ? Number(b.targetFloorId) : null,
-          targetArea: b.targetArea ?? null,
-          occurredFrom: new Date(b.occurredFrom),
+          targetFloorId: b.targetRoomId ? null : Number(b.targetFloorId),
+          targetArea: typeof b.targetArea === 'string' ? b.targetArea.slice(0, 100) : null,
+          occurredFrom,
           occurredTo: b.occurredTo ? new Date(b.occurredTo) : null,
-          description: b.description ?? null,
+          description: typeof b.description === 'string' ? b.description.slice(0, 500) : null,
           lang: 'zh',
-          priority: b.priority ?? 'NORMAL',
+          priority: ['LOW', 'NORMAL', 'HIGH', 'URGENT'].includes(b.priority) ? b.priority : 'NORMAL',
           status: 'ACCEPTED',
           acceptedAt: new Date(),
           handledBy: actor(req),
@@ -225,12 +235,9 @@ export default async function complaintRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const c = await loadInScope(req, reply, Number(req.params.id));
       if (!c) return;
-      if (c.status !== 'NEW') return reply.code(400).send({ error: '这条投诉已经受理过了' });
-
-      const updated = await prisma.complaint.update({
-        where: { id: c.id },
-        data: { status: 'ACCEPTED', acceptedAt: new Date(), handledBy: actor(req) },
-      });
+      const updated = await transition(reply, c.id, ['NEW'],
+        { status: 'ACCEPTED', acceptedAt: new Date(), handledBy: actor(req) }, '这条投诉已经受理过了');
+      if (!updated) return;
       await logEvent(c.id, 'ACCEPT', actor(req), req.body?.note ?? '已受理，正在安排核实', true);
       // 告诉投诉人一声。不反馈的话，下次就没人再投诉了
       await notify('COMPLAINT_ACCEPTED', { personId: c.complainantId },
@@ -245,10 +252,9 @@ export default async function complaintRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const c = await loadInScope(req, reply, Number(req.params.id));
       if (!c) return;
-      const updated = await prisma.complaint.update({
-        where: { id: c.id },
-        data: { status: 'INVESTIGATING', handledBy: actor(req) },
-      });
+      const updated = await transition(reply, c.id, ['ACCEPTED'],
+        { status: 'INVESTIGATING', handledBy: actor(req) }, '只有已受理的投诉才能转入核实');
+      if (!updated) return;
       // 核实过程默认对投诉人不可见 —— "已调取 A-305 门口监控"这种不该让他看到
       await logEvent(c.id, 'INVESTIGATE', actor(req), req.body?.note ?? '开始核实', false);
       return updated;
@@ -283,21 +289,50 @@ export default async function complaintRoutes(app: FastifyInstance) {
       if (!['SUBSTANTIATED', 'UNSUBSTANTIATED', 'DUPLICATE'].includes(outcome)) {
         return reply.code(400).send({ error: '请给出认定结论' });
       }
-      if (!b.resolution?.trim()) {
+      if (typeof b.resolution !== 'string' || !b.resolution.trim()) {
         return reply.code(400).send({ error: '必须填写认定说明 —— 不成立也要给投诉人一个说法' });
       }
+      if (!OPEN_STATUS.includes(c.status) || c.status === 'NEW') {
+        return reply.code(400).send({ error: '只有已受理、未认定的投诉才能认定' });
+      }
+
+      // **只有明确选了违规类型才开违规单**。以前留空会自动套用类别的默认违规类型，
+      // 界面上写着「留空则不生成违规记录」，实际却照样扣分 —— 说的和做的不一致，最伤信任。
+      // 校验全部放在改状态之前：校验失败时投诉必须还是原样
+      let vt: any = null;
+      let picked: number[] = [];
+      if (outcome === 'SUBSTANTIATED' && b.violationTypeId) {
+        vt = await prisma.violationType.findUnique({ where: { id: Number(b.violationTypeId) } });
+        if (!vt) return reply.code(400).send({ error: '违规类型不存在' });
+        // 责任人只能从被投诉房间此刻的在住名单里选，不能借投诉给任意一个人开罚单
+        const occupantIds = c.targetRoomId
+          ? (await prisma.occupancy.findMany({
+              where: { bed: { roomId: c.targetRoomId }, status: { in: ['ACTIVE', 'HELD', 'RESERVED'] } },
+              select: { personId: true },
+            })).map((o) => o.personId)
+          : [];
+        picked = Array.isArray(b.violationPersonIds) ? b.violationPersonIds.map(Number) : [];
+        if (picked.some((id) => !occupantIds.includes(id))) {
+          return reply.code(400).send({ error: '责任人必须是被投诉房间当前的在住人员' });
+        }
+      }
+
+      // 先占住状态再开违规单：连点两下「提交认定」时，第二次在这里就被挡掉，不会开出两套违规单
+      const claimed = await prisma.complaint.updateMany({
+        where: { id: c.id, status: { in: ['ACCEPTED', 'INVESTIGATING'] } },
+        data: { status: outcome, resolution: b.resolution.trim(), resolvedAt: new Date(), handledBy: actor(req) },
+      });
+      if (claimed.count === 0) return reply.code(409).send({ error: '这条投诉刚被别人处理过，请刷新' });
 
       let violationId: number | null = null;
       const createdCodes: string[] = [];
 
-      if (outcome === 'SUBSTANTIATED') {
-        const typeId = b.violationTypeId ?? c.type.violationTypeId ?? null;
-        if (typeId) {
-          const vt = await prisma.violationType.findUnique({ where: { id: Number(typeId) } });
-          if (!vt) return reply.code(400).send({ error: '违规类型不存在' });
+      if (vt) {
+        {
+          const points = Number.isFinite(Number(b.points)) && Number(b.points) >= 0 ? Number(b.points) : vt.defaultPoints;
+          const fine = Number.isFinite(Number(b.fine)) && Number(b.fine) >= 0 ? Number(b.fine) : vt.defaultFine;
           // 选了人就一人一条；没选人就在房间上记一条（找不到具体责任人时的常见情况）
-          const targets: (number | null)[] =
-            b.violationPersonIds && b.violationPersonIds.length > 0 ? b.violationPersonIds : [null];
+          const targets: (number | null)[] = picked.length > 0 ? picked : [null];
           for (const personId of targets) {
             const v = await prisma.violation.create({
               data: {
@@ -306,8 +341,8 @@ export default async function complaintRoutes(app: FastifyInstance) {
                 roomId: c.targetRoomId ?? null,
                 typeId: vt.id,
                 occurredAt: c.occurredFrom,
-                points: b.points ?? vt.defaultPoints,
-                fine: b.fine ?? vt.defaultFine,
+                points,
+                fine,
                 description: `由投诉 ${c.code} 认定成立：${b.resolution.trim()}`,
                 evidence: `投诉 ${c.code}`,
                 recordedBy: actor(req),
@@ -325,16 +360,9 @@ export default async function complaintRoutes(app: FastifyInstance) {
         }
       }
 
-      const updated = await prisma.complaint.update({
-        where: { id: c.id },
-        data: {
-          status: outcome,
-          resolution: b.resolution.trim(),
-          resolvedAt: new Date(),
-          handledBy: actor(req),
-          violationId,
-        },
-      });
+      const updated = violationId
+        ? await prisma.complaint.update({ where: { id: c.id }, data: { violationId } })
+        : await prisma.complaint.findUniqueOrThrow({ where: { id: c.id } });
 
       const noteSuffix = createdCodes.length > 0 ? `（已开违规单 ${createdCodes.join('、')}）` : '';
       await logEvent(c.id, 'RESOLVE', actor(req), `${outcomeLabel(outcome)}：${b.resolution.trim()}${noteSuffix}`, true);
@@ -357,9 +385,10 @@ export default async function complaintRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const c = await loadInScope(req, reply, Number(req.params.id));
       if (!c) return;
-      const updated = await prisma.complaint.update({
-        where: { id: c.id }, data: { status: 'CLOSED', closedAt: new Date() },
-      });
+      // 只能归档已经有结论的 —— 否则「认定说明必填」这条规矩可以从归档绕过去
+      const updated = await transition(reply, c.id, ['SUBSTANTIATED', 'UNSUBSTANTIATED', 'DUPLICATE'],
+        { status: 'CLOSED', closedAt: new Date() }, '还没有认定结论，不能归档');
+      if (!updated) return;
       await logEvent(c.id, 'CLOSE', actor(req), req.body?.note ?? '已归档', true);
       return updated;
     }
@@ -372,7 +401,7 @@ export default async function complaintRoutes(app: FastifyInstance) {
       const c = await loadInScope(req, reply, Number(req.params.id));
       if (!c) return;
       if (!req.body?.note?.trim()) return reply.code(400).send({ error: '备注内容不能为空' });
-      await logEvent(c.id, 'COMMENT', actor(req), req.body.note.trim(), req.body.visibleToComplainant ?? false);
+      await logEvent(c.id, 'COMMENT', actor(req), req.body.note.trim().slice(0, 1000), req.body.visibleToComplainant === true);
       return { ok: true };
     }
   );
@@ -385,13 +414,15 @@ export default async function complaintRoutes(app: FastifyInstance) {
       if (!c) return;
       const intoId = Number(req.body?.intoId);
       if (!intoId || intoId === c.id) return reply.code(400).send({ error: '请选择要合并到的投诉' });
-      const into = await prisma.complaint.findUnique({ where: { id: intoId } });
-      if (!into) return reply.code(400).send({ error: '目标投诉不存在' });
+      const into = await prisma.complaint.findFirst({ where: { AND: [{ id: intoId }, complaintScope(req)] } });
+      if (!into) return reply.code(400).send({ error: '目标投诉不存在或不在你的处理范围内' });
+      if (into.mergedIntoId) return reply.code(400).send({ error: `${into.code} 本身已并入别的投诉，请合并到主单` });
 
-      const updated = await prisma.complaint.update({
-        where: { id: c.id },
-        data: { status: 'DUPLICATE', mergedIntoId: intoId, resolvedAt: new Date(), handledBy: actor(req) },
-      });
+      const updated = await transition(reply, c.id, OPEN_STATUS,
+        { status: 'DUPLICATE', mergedIntoId: intoId, resolvedAt: new Date(), handledBy: actor(req),
+          resolution: `与 ${into.code} 是同一件事，已合并处理` },
+        '已经有结论的投诉不能再合并');
+      if (!updated) return;
       await logEvent(c.id, 'MERGE', actor(req), `与 ${into.code} 是同一件事，已合并`, true);
       await logEvent(intoId, 'COMMENT', actor(req), `${c.code} 反映同一件事，已并入本单`, false);
       return updated;
@@ -418,6 +449,8 @@ export default async function complaintRoutes(app: FastifyInstance) {
       const file = path.join(UPLOAD_DIR, att.storedName);
       if (!fs.existsSync(file)) return reply.code(404).send({ error: '附件文件已丢失' });
       reply.header('Content-Type', att.mimeType);
+      reply.header('X-Content-Type-Options', 'nosniff');
+      reply.header('Content-Disposition', 'inline');
       reply.header('Cache-Control', 'private, max-age=3600');
       return reply.send(fs.createReadStream(file));
     }
@@ -476,6 +509,19 @@ export default async function complaintRoutes(app: FastifyInstance) {
 
 const outcomeLabel = (o: string) =>
   o === 'SUBSTANTIATED' ? '认定成立' : o === 'UNSUBSTANTIATED' ? '认定不成立' : '重复投诉';
+
+/**
+ * 状态流转。用条件更新而不是先读后写：两个人同时点、或者一个人连点两下，
+ * 只有一次能成功，另一次拿到明确的 409 而不是把状态改乱。
+ */
+async function transition(reply: any, id: number, from: string[], data: any, errMsg: string) {
+  const r = await prisma.complaint.updateMany({ where: { id, status: { in: from } }, data });
+  if (r.count === 0) {
+    reply.code(409).send({ error: errMsg });
+    return null;
+  }
+  return prisma.complaint.findUniqueOrThrow({ where: { id } });
+}
 
 /** 取一条投诉并确认它在当前用户的处理范围内，不在就直接 404（不透露它存在） */
 async function loadInScope(req: any, reply: any, id: number) {

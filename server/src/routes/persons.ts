@@ -1,7 +1,15 @@
 import type { FastifyInstance } from 'fastify';
-import { prisma } from '../db.js';
+import type { FastifyRequest } from 'fastify';
+import { prisma, paging } from '../db.js';
 import { PERSON_INCLUDE, parseLangs } from '../services/space.js';
-import { requirePerm } from '../services/auth.js';
+import { requirePerm, buildingScope, personScopeWhere, bedInScope, audit } from '../services/auth.js';
+
+/** 这个人在不在当前用户的范围内（住在范围内的楼，或者还没床位） */
+async function personVisible(req: FastifyRequest, personId: number) {
+  const scope = buildingScope(req);
+  if (!scope) return true;
+  return (await prisma.person.count({ where: { AND: [{ id: personId }, personScopeWhere(scope)] } })) > 0;
+}
 
 const LIVE = ['ACTIVE', 'HELD', 'RESERVED'];
 
@@ -75,12 +83,12 @@ export function serializePerson(p: any) {
 export default async function personRoutes(app: FastifyInstance) {
   app.get<{
     Querystring: Record<string, string | undefined>;
-  }>('/api/persons', async (req) => {
-    const page = Number(req.query.page ?? 1);
-    const pageSize = Math.min(Number(req.query.pageSize ?? 30), 500);
+  }>('/api/persons', { preHandler: requirePerm('person:read') }, async (req) => {
+    const { page, pageSize } = paging(req.query, 30, 500);
     const q = req.query.q?.trim();
 
-    const where: any = {};
+    // 楼栋宿管只看住在自己楼里的人 + 还没床位的人（要能搜到新员工才能给他排宿）
+    const where: any = { AND: [personScopeWhere(buildingScope(req))] };
     if (q) {
       where.OR = [
         { name: { contains: q } }, { nameLocal: { contains: q } },
@@ -117,10 +125,10 @@ export default async function personRoutes(app: FastifyInstance) {
     return { total, page, pageSize, rows: rows.map(serializePerson) };
   });
 
-  app.get<{ Params: { id: string } }>('/api/persons/:id', async (req, reply) => {
+  app.get<{ Params: { id: string } }>('/api/persons/:id', { preHandler: requirePerm('person:read') }, async (req, reply) => {
     const id = Number(req.params.id);
     const p = await prisma.person.findUnique({ where: { id }, include: INCLUDE });
-    if (!p) return reply.code(404).send({ error: 'person not found' });
+    if (!p || !(await personVisible(req, id))) return reply.code(404).send({ error: '人员不存在或不在你的管辖范围内' });
 
     const [history, rels, items, deposits, violations, workOrders] = await Promise.all([
       prisma.occupancy.findMany({
@@ -192,7 +200,9 @@ export default async function personRoutes(app: FastifyInstance) {
       if (data[k]) data[k] = new Date(data[k]);
     }
     if (Array.isArray(data.languages)) data.languages = data.languages.join(',');
-    return prisma.person.update({ where: { id }, data });
+    const updated = await prisma.person.update({ where: { id }, data });
+    await audit(req, 'PERSON_UPDATE', { targetType: 'Person', targetId: id, detail: Object.keys(data).join(',') });
+    return updated;
   });
 
   app.post<{ Body: Record<string, any> }>('/api/persons',
@@ -207,13 +217,15 @@ export default async function personRoutes(app: FastifyInstance) {
   // ---------------- 亲属关系（夫妻房的前置条件） ----------------
   app.get<{ Querystring: { personId?: string; type?: string; verified?: string } }>(
     '/api/relationships',
+    { preHandler: requirePerm('person:read') },
     async (req) => {
-      const where: any = {};
+      const scope = buildingScope(req);
+      const where: any = scope ? { OR: [{ person: personScopeWhere(scope) }, { related: personScopeWhere(scope) }] } : {};
       if (req.query.type) where.type = req.query.type;
       if (req.query.verified) where.verified = req.query.verified === 'true';
       if (req.query.personId) {
         const id = Number(req.query.personId);
-        where.OR = [{ personId: id }, { relatedPersonId: id }];
+        where.AND = [{ OR: [{ personId: id }, { relatedPersonId: id }] }];
       }
       const rows = await prisma.relationship.findMany({
         where,
@@ -239,7 +251,9 @@ export default async function personRoutes(app: FastifyInstance) {
     '/api/relationships',
     { preHandler: requirePerm('person:write') },
     async (req, reply) => {
-      const { personId, relatedPersonId, type } = req.body;
+      const b = req.body ?? ({} as any);
+      const personId = Number(b.personId), relatedPersonId = Number(b.relatedPersonId), type = b.type;
+      if (!personId || !relatedPersonId || !type) return reply.code(400).send({ error: '请选择双方和关系类型' });
       if (personId === relatedPersonId) return reply.code(400).send({ error: '不能与自己建立关系' });
       const exists = await prisma.relationship.findFirst({
         where: {
@@ -251,25 +265,46 @@ export default async function personRoutes(app: FastifyInstance) {
         },
       });
       if (exists) return reply.code(400).send({ error: '该关系已存在' });
-      return prisma.relationship.create({ data: req.body });
+      const rel = await prisma.relationship.create({
+        data: {
+          personId, relatedPersonId, type,
+          verified: !!b.verified, verifiedBy: b.verified ? (b.verifiedBy ?? req.auth!.name) : null,
+          note: typeof b.note === 'string' ? b.note : null,
+        },
+      });
+      await audit(req, 'RELATIONSHIP_CREATE', { targetType: 'Relationship', targetId: rel.id, detail: `${personId}-${type}-${relatedPersonId}` });
+      return rel;
     }
   );
 
   app.put<{ Params: { id: string }; Body: { verified?: boolean; verifiedBy?: string; note?: string } }>(
     '/api/relationships/:id',
     { preHandler: requirePerm('person:write') },
-    async (req) => prisma.relationship.update({ where: { id: Number(req.params.id) }, data: req.body })
+    async (req) => {
+      // 只放行核验相关字段 —— 夫妻房资格就挂在 verified 上，不能顺手把关系双方也改了
+      const b = req.body ?? {};
+      const data: any = {};
+      if ('verified' in b) { data.verified = !!b.verified; data.verifiedBy = b.verified ? (b.verifiedBy ?? req.auth!.name) : null; }
+      if ('note' in b) data.note = b.note;
+      const rel = await prisma.relationship.update({ where: { id: Number(req.params.id) }, data });
+      await audit(req, 'RELATIONSHIP_UPDATE', { targetType: 'Relationship', targetId: rel.id, detail: JSON.stringify(data) });
+      return rel;
+    }
   );
 
   app.delete<{ Params: { id: string } }>('/api/relationships/:id',
     { preHandler: requirePerm('person:write') },
-    async (req) =>
-    prisma.relationship.delete({ where: { id: Number(req.params.id) } })
+    async (req) => {
+      const rel = await prisma.relationship.delete({ where: { id: Number(req.params.id) } });
+      await audit(req, 'RELATIONSHIP_DELETE', { targetType: 'Relationship', targetId: rel.id, detail: `${rel.personId}-${rel.type}-${rel.relatedPersonId}` });
+      return rel;
+    }
   );
 
   /** 一张床住过谁 —— 事故追溯 / 密接排查用 */
-  app.get<{ Params: { id: string } }>('/api/beds/:id/history', async (req) => {
+  app.get<{ Params: { id: string } }>('/api/beds/:id/history', { preHandler: requirePerm('person:read') }, async (req, reply) => {
     const bedId = Number(req.params.id);
+    if (!(await bedInScope(req, bedId))) return reply.code(404).send({ error: '床位不存在或不在你的管辖范围内' });
     const rows = await prisma.occupancy.findMany({
       where: { bedId }, orderBy: { checkInAt: 'desc' },
       include: { person: { include: { department: true, nationality: true } } },
@@ -287,8 +322,10 @@ export default async function personRoutes(app: FastifyInstance) {
    */
   app.get<{ Params: { id: string }; Querystring: { from?: string; to?: string; scope?: string } }>(
     '/api/persons/:id/contacts',
+    { preHandler: requirePerm('person:read') },
     async (req, reply) => {
       const id = Number(req.params.id);
+      if (!(await personVisible(req, id))) return reply.code(404).send({ error: '人员不存在或不在你的管辖范围内' });
       const from = req.query.from ? new Date(req.query.from) : new Date(Date.now() - 14 * 86400000);
       const to = req.query.to ? new Date(req.query.to) : new Date();
       const scope = req.query.scope ?? 'ROOM';

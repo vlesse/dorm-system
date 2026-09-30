@@ -78,26 +78,36 @@ export default async function configRoutes(app: FastifyInstance) {
 
   for (const [path, model] of Object.entries(DICTS)) {
     const repo = () => (prisma as any)[model];
+    // 角色表存的是权限点。只凭 config:write 就能改，宿舍主管就能把自己的角色改成 `*`
+    // 变成超级管理员 —— 所以角色走账号管理的权限（只有管理员有）
+    const writePerm = model === 'role' ? 'user:write' : 'config:write';
 
     app.get(`/api/config/${path}`, async () => repo().findMany());
 
     app.post<{ Body: Record<string, any> }>(`/api/config/${path}`,
-      { preHandler: requirePerm('config:write') },
-      async (req) => repo().create({ data: req.body })
+      { preHandler: requirePerm(writePerm) },
+      async (req) => {
+        const created = await repo().create({ data: req.body });
+        await audit(req, 'CONFIG_CREATE', { targetType: model, detail: JSON.stringify(req.body).slice(0, 300) });
+        return created;
+      }
     );
 
     app.put<{ Params: { id: string }; Body: Record<string, any> }>(
       `/api/config/${path}/:id`,
-      { preHandler: requirePerm('config:write') },
-      async (req) => {
+      { preHandler: requirePerm(writePerm) },
+      async (req, reply) => {
         const id = model === 'nationality' ? req.params.id : Number(req.params.id);
-        const { id: _drop, ...data } = req.body;
-        return repo().update({ where: { id }, data });
+        const { id: _drop, ...data } = req.body ?? {};
+        if (!(await repo().findUnique({ where: { id } }))) return reply.code(404).send({ error: '记录不存在' });
+        const updated = await repo().update({ where: { id }, data });
+        await audit(req, 'CONFIG_UPDATE', { targetType: model, detail: `#${id} ${JSON.stringify(data).slice(0, 300)}` });
+        return updated;
       }
     );
 
     app.delete<{ Params: { id: string } }>(`/api/config/${path}/:id`,
-      { preHandler: requirePerm('config:write') },
+      { preHandler: requirePerm(writePerm) },
       async (req, reply) => {
       const id = model === 'nationality' ? req.params.id : Number(req.params.id);
       try {

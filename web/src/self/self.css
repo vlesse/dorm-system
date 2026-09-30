@@ -31,7 +31,9 @@
 .self-tabbar {
   flex: 0 0 auto;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  /* 按标签个数自动等分。写死 repeat(4) 的话，加了「投诉」变成 5 个，「我的」就掉到第二行 */
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
   background: #fff;
   border-top: 1px solid #eaecef;
   padding-bottom: env(safe-area-inset-bottom);

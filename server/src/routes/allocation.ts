@@ -4,7 +4,19 @@ import { evaluateAssignment, splitChecks, scoreAssignment } from '../services/ru
 import {
   ROOM_INCLUDE, PERSON_INCLUDE, personToLike, roomToContext, serializeRoom, spouseIdsOf,
 } from '../services/space.js';
-import { requirePerm, actor, audit } from '../services/auth.js';
+import { requirePerm, actor, audit, buildingScope, bedInScope, roomInScope } from '../services/auth.js';
+
+const NOT_IN_SCOPE = { error: '床位 / 房间不存在或不在你的管辖范围内' };
+
+/**
+ * 在事务里「抢」一张空床：只有状态还是 FREE 才改得动。
+ * 先查后写的话，两个宿管同时给同一张床排人，两次检查都会看到 FREE，结果一床两人。
+ */
+async function claimBed(tx: any, bedId: number, status: string) {
+  const r = await tx.bed.updateMany({ where: { id: bedId, status: 'FREE' }, data: { status } });
+  if (r.count === 0) throw new BedTaken();
+}
+class BedTaken extends Error { constructor() { super('这张床刚被别人占用了，请刷新后重选'); } }
 import { notify } from '../services/notify.js';
 
 const LIVE = ['ACTIVE', 'HELD', 'RESERVED'];
@@ -40,7 +52,11 @@ export default async function allocationRoutes(app: FastifyInstance) {
           status: 'AVAILABLE',
           roomType: { isResidential: true },
           beds: { some: { status: 'FREE' } },
-          ...(req.query.buildingId ? { floor: { buildingId: Number(req.query.buildingId) } } : {}),
+          AND: [
+            req.query.buildingId ? { floor: { buildingId: Number(req.query.buildingId) } } : {},
+            // 楼栋宿管只能往自己的楼里排
+            ...(buildingScope(req) ? [{ floor: { buildingId: { in: buildingScope(req)! } } }] : []),
+          ],
           ...(req.query.roomTypeId ? { roomTypeId: Number(req.query.roomTypeId) } : {}),
         },
         include: ROOM_INCLUDE,
@@ -121,8 +137,10 @@ export default async function allocationRoutes(app: FastifyInstance) {
     '/api/allocation/assign',
     { preHandler: requirePerm('allocation:write') },
     async (req, reply) => {
-      const { personId, bedId, note, force = false, reserveOnly = false } = req.body;
-      const operator = req.body.operator ?? actor(req);
+      const personId = Number(req.body?.personId), bedId = Number(req.body?.bedId);
+      const { note, force = false, reserveOnly = false } = req.body ?? ({} as any);
+      const operator = actor(req);
+      if (!(await bedInScope(req, bedId))) return reply.code(404).send(NOT_IN_SCOPE);
       const person = await prisma.person.findUnique({ where: { id: personId }, include: PERSON_INCLUDE });
       if (!person) return reply.code(404).send({ error: '人员不存在' });
       if (person.employmentStatus === 'RESIGNED')
@@ -142,16 +160,22 @@ export default async function allocationRoutes(app: FastifyInstance) {
       if (blockers.length > 0) return reply.code(400).send({ error: '不满足硬性排宿规则', blockers });
       if (warnings.length > 0 && !force) return reply.code(409).send({ error: '存在排宿提醒，确认后可继续', warnings });
 
-      const result = await prisma.$transaction(async (tx) => {
+      let result: any;
+      try {
+        result = await prisma.$transaction(async (tx) => {
+        await claimBed(tx, bedId, reserveOnly ? 'RESERVED' : 'OCCUPIED');
         const occ = await tx.occupancy.create({
           data: { bedId, personId, status: reserveOnly ? 'RESERVED' : 'ACTIVE', assignedBy: operator, note },
         });
-        await tx.bed.update({ where: { id: bedId }, data: { status: reserveOnly ? 'RESERVED' : 'OCCUPIED' } });
         await tx.occupancyEvent.create({
           data: { type: reserveOnly ? 'ASSIGN' : 'CHECKIN', personId, bedId, operator, note },
         });
         return occ;
-      });
+        });
+      } catch (e) {
+        if (e instanceof BedTaken) return reply.code(409).send({ error: e.message });
+        throw e;
+      }
       await audit(req, 'ASSIGN', { targetType: 'Person', targetId: personId, detail: bed.code });
       await notify('BED_ASSIGNED', { personId }, {
         name: person.name, room: bed.room.code, bed: bed.label,
@@ -165,13 +189,16 @@ export default async function allocationRoutes(app: FastifyInstance) {
     '/api/allocation/transfer',
     { preHandler: requirePerm('allocation:write') },
     async (req, reply) => {
-      const { personId, toBedId, reason, force = false } = req.body;
-      const operator = req.body.operator ?? actor(req);
+      const personId = Number(req.body?.personId), toBedId = Number(req.body?.toBedId);
+      const { reason, force = false } = req.body ?? ({} as any);
+      const operator = actor(req);
+      if (!(await bedInScope(req, toBedId))) return reply.code(404).send(NOT_IN_SCOPE);
       const person = await prisma.person.findUnique({ where: { id: personId }, include: PERSON_INCLUDE });
       if (!person) return reply.code(404).send({ error: '人员不存在' });
       const existing = await currentOccupancy(personId);
       if (!existing) return reply.code(400).send({ error: '该人员当前没有床位，请使用「分配」' });
       if (existing.bedId === toBedId) return reply.code(400).send({ error: '目标床位与当前床位相同' });
+      if (!(await bedInScope(req, existing.bedId))) return reply.code(404).send({ error: '该人员当前住在你管辖范围以外的楼栋' });
 
       const bed = await prisma.bed.findUnique({ where: { id: toBedId }, include: { room: { include: ROOM_INCLUDE } } });
       if (!bed) return reply.code(404).send({ error: '目标床位不存在' });
@@ -185,7 +212,10 @@ export default async function allocationRoutes(app: FastifyInstance) {
 
       const fromBedId = existing.bedId;
       const keepHeld = existing.status === 'HELD';
-      const out = await prisma.$transaction(async (tx) => {
+      let out: any;
+      try {
+        out = await prisma.$transaction(async (tx) => {
+        await claimBed(tx, toBedId, keepHeld ? 'HELD' : 'OCCUPIED');
         await tx.occupancy.update({
           where: { id: existing.id },
           data: { status: 'ENDED', checkOutAt: new Date(), closedBy: operator, reason: reason ?? '调宿' },
@@ -194,12 +224,15 @@ export default async function allocationRoutes(app: FastifyInstance) {
         const occ = await tx.occupancy.create({
           data: { bedId: toBedId, personId, status: keepHeld ? 'HELD' : 'ACTIVE', assignedBy: operator, note: reason },
         });
-        await tx.bed.update({ where: { id: toBedId }, data: { status: keepHeld ? 'HELD' : 'OCCUPIED' } });
         await tx.occupancyEvent.create({
           data: { type: 'TRANSFER', personId, bedId: toBedId, fromBedId, toBedId, operator, note: reason },
         });
         return occ;
-      });
+        });
+      } catch (e) {
+        if (e instanceof BedTaken) return reply.code(409).send({ error: e.message });
+        throw e;
+      }
       await audit(req, 'TRANSFER', {
         targetType: 'Person', targetId: personId,
         detail: `${existing.bed.code} → ${bed.code}`,
@@ -219,10 +252,12 @@ export default async function allocationRoutes(app: FastifyInstance) {
     '/api/allocation/checkout',
     { preHandler: requirePerm('allocation:write') },
     async (req, reply) => {
-      const { personId, reason, settleItems = false, force = false } = req.body;
-      const operator = req.body.operator ?? actor(req);
+      const personId = Number(req.body?.personId);
+      const { reason, settleItems = false, force = false } = req.body ?? ({} as any);
+      const operator = actor(req);
       const existing = await currentOccupancy(personId);
       if (!existing) return reply.code(400).send({ error: '该人员当前没有在住床位' });
+      if (!(await bedInScope(req, existing.bedId))) return reply.code(404).send(NOT_IN_SCOPE);
 
       const pending = await prisma.issuedItem.findMany({
         where: { personId, returnedAt: null },
@@ -266,25 +301,35 @@ export default async function allocationRoutes(app: FastifyInstance) {
   );
 
   /** 休假保留床位 / 返岗恢复 */
-  app.post<{ Body: { personId: number; operator?: string; note?: string } }>('/api/allocation/hold', async (req, reply) => {
-    const { personId, note } = req.body;
-    const operator = req.body.operator ?? actor(req);
+  // 以前 hold / resume / extra-bed / 床位状态这四个写接口没挂权限，只读账号也能改
+  app.post<{ Body: { personId: number; operator?: string; note?: string } }>('/api/allocation/hold',
+    { preHandler: requirePerm('allocation:write') }, async (req, reply) => {
+    const personId = Number(req.body?.personId);
+    const note = req.body?.note;
+    const operator = actor(req);
     const existing = await currentOccupancy(personId);
     if (!existing) return reply.code(400).send({ error: '该人员当前没有床位' });
+    if (!(await bedInScope(req, existing.bedId))) return reply.code(404).send(NOT_IN_SCOPE);
+    if (existing.status !== 'ACTIVE') return reply.code(400).send({ error: '只有在住状态才能办理休假保留' });
     await prisma.$transaction(async (tx) => {
       await tx.occupancy.update({ where: { id: existing.id }, data: { status: 'HELD', note: note ?? '休假，床位保留' } });
       await tx.bed.update({ where: { id: existing.bedId }, data: { status: 'HELD' } });
       await tx.person.update({ where: { id: personId }, data: { employmentStatus: 'ON_LEAVE' } });
       await tx.occupancyEvent.create({ data: { type: 'HOLD', personId, bedId: existing.bedId, operator, note } });
     });
+    await audit(req, 'HOLD', { targetType: 'Person', targetId: personId, detail: existing.bed.code });
     return { ok: true };
   });
 
-  app.post<{ Body: { personId: number; operator?: string } }>('/api/allocation/resume', async (req, reply) => {
-    const { personId } = req.body;
-    const operator = req.body.operator ?? actor(req);
+  app.post<{ Body: { personId: number; operator?: string } }>('/api/allocation/resume',
+    { preHandler: requirePerm('allocation:write') }, async (req, reply) => {
+    const personId = Number(req.body?.personId);
+    const operator = actor(req);
     const existing = await currentOccupancy(personId);
     if (!existing) return reply.code(400).send({ error: '该人员当前没有保留床位' });
+    if (!(await bedInScope(req, existing.bedId))) return reply.code(404).send(NOT_IN_SCOPE);
+    // 不校验的话，对在住的人点「返岗」会把休假周期起点重置成今天
+    if (existing.status !== 'HELD') return reply.code(400).send({ error: '该人员不是休假保留状态' });
     await prisma.$transaction(async (tx) => {
       await tx.occupancy.update({ where: { id: existing.id }, data: { status: 'ACTIVE' } });
       await tx.bed.update({ where: { id: existing.bedId }, data: { status: 'OCCUPIED' } });
@@ -294,6 +339,7 @@ export default async function allocationRoutes(app: FastifyInstance) {
       });
       await tx.occupancyEvent.create({ data: { type: 'RESUME', personId, bedId: existing.bedId, operator } });
     });
+    await audit(req, 'RESUME', { targetType: 'Person', targetId: personId, detail: existing.bed.code });
     return { ok: true };
   });
 
@@ -305,8 +351,10 @@ export default async function allocationRoutes(app: FastifyInstance) {
     '/api/allocation/assign-couple',
     { preHandler: requirePerm('allocation:write') },
     async (req, reply) => {
-      const { personIdA, personIdB, roomId, force = false } = req.body;
-      const operator = req.body.operator ?? actor(req);
+      const personIdA = Number(req.body?.personIdA), personIdB = Number(req.body?.personIdB), roomId = Number(req.body?.roomId);
+      const force = !!req.body?.force;
+      const operator = actor(req);
+      if (!(await roomInScope(req, roomId))) return reply.code(404).send(NOT_IN_SCOPE);
       const room = await prisma.room.findUnique({ where: { id: roomId }, include: ROOM_INCLUDE });
       if (!room) return reply.code(404).send({ error: '房间不存在' });
       if (!room.roomType.isCoupleRoom) return reply.code(400).send({ error: '该房间不是夫妻房 / 家庭房' });
@@ -340,17 +388,23 @@ export default async function allocationRoutes(app: FastifyInstance) {
       if (allWarnings.length > 0 && !force)
         return reply.code(409).send({ error: '存在排宿提醒，确认后可继续', warnings: allWarnings });
 
-      await prisma.$transaction(async (tx) => {
+      try {
+       await prisma.$transaction(async (tx) => {
         for (const [p, bed] of [[a, freeBeds[0]], [b, freeBeds[1]]] as const) {
+          await claimBed(tx, bed.id, 'OCCUPIED');
           await tx.occupancy.create({
             data: { bedId: bed.id, personId: p.id, status: 'ACTIVE', assignedBy: operator, note: '夫妻房整体安排' },
           });
-          await tx.bed.update({ where: { id: bed.id }, data: { status: 'OCCUPIED' } });
           await tx.occupancyEvent.create({
             data: { type: 'CHECKIN', personId: p.id, bedId: bed.id, operator, note: '夫妻房整体安排' },
           });
         }
-      });
+       });
+      } catch (e) {
+        if (e instanceof BedTaken) return reply.code(409).send({ error: e.message });
+        throw e;
+      }
+      await audit(req, 'ASSIGN_COUPLE', { targetType: 'Room', targetId: roomId, detail: `${a.name} + ${b.name}` });
       return { ok: true, roomCode: room.code, warnings: allWarnings };
     }
   );
@@ -358,13 +412,19 @@ export default async function allocationRoutes(app: FastifyInstance) {
   /** 加床（临时应急）。加床不计入核定人数，会单独标记 */
   app.post<{ Body: { roomId: number; label?: string; operator?: string; reason?: string } }>(
     '/api/allocation/extra-bed',
+    { preHandler: requirePerm('allocation:write') },
     async (req, reply) => {
-      const { roomId, label, reason } = req.body;
-      const operator = req.body.operator ?? actor(req);
+      const roomId = Number(req.body?.roomId);
+      const { label, reason } = req.body ?? ({} as any);
+      const operator = actor(req);
+      if (!(await roomInScope(req, roomId))) return reply.code(404).send(NOT_IN_SCOPE);
       const room = await prisma.room.findUnique({ where: { id: roomId }, include: { beds: true, roomType: true } });
       if (!room) return reply.code(404).send({ error: '房间不存在' });
       if (!room.roomType.isResidential) return reply.code(400).send({ error: '功能房不能加床' });
-      const n = room.beds.length + 1;
+      // 编号取「已有加床数 + 1」并避开已存在的编号 —— 按总床数算会和已有的 X 床撞 unique
+      const codes = new Set(room.beds.map((b) => b.code));
+      let n = room.beds.length + 1;
+      while (codes.has(`${room.code}-X${n}`)) n++;
       const bed = await prisma.bed.create({
         data: {
           roomId, code: `${room.code}-X${n}`, label: label ?? `加床 ${n}`,
@@ -373,6 +433,7 @@ export default async function allocationRoutes(app: FastifyInstance) {
         },
       });
       await prisma.occupancyEvent.create({ data: { type: 'EXTRA_BED', bedId: bed.id, operator, note: reason } });
+      await audit(req, 'EXTRA_BED', { targetType: 'Room', targetId: roomId, detail: bed.code });
       return { ok: true, bed };
     }
   );
@@ -380,13 +441,22 @@ export default async function allocationRoutes(app: FastifyInstance) {
   /** 床位状态直接调整：撤除（降标）/ 报修 / 恢复 */
   app.put<{ Params: { id: string }; Body: { status: string; note?: string } }>(
     '/api/beds/:id/status',
+    { preHandler: requirePerm('space:room') },
     async (req, reply) => {
       const id = Number(req.params.id);
+      const status = req.body?.status;
+      // 手工只能在「可用 / 报修 / 封锁 / 撤除」之间切。占用、保留、预留只能由排宿流程产生，
+      // 否则会出现床位显示已住、却没有任何入住记录的幽灵床
+      if (!['FREE', 'MAINTENANCE', 'LOCKED', 'DISABLED'].includes(status))
+        return reply.code(400).send({ error: '床位状态只能手工改为 可用 / 报修 / 封锁 / 撤除' });
+      if (!(await bedInScope(req, id))) return reply.code(404).send(NOT_IN_SCOPE);
       const bed = await prisma.bed.findUnique({ where: { id }, include: { occupancies: { where: { status: { in: LIVE } } } } });
       if (!bed) return reply.code(404).send({ error: '床位不存在' });
-      if (bed.occupancies.length > 0 && req.body.status !== 'OCCUPIED')
+      if (bed.occupancies.length > 0)
         return reply.code(400).send({ error: '该床位仍有在住人员，请先退宿或调宿' });
-      return prisma.bed.update({ where: { id }, data: { status: req.body.status, note: req.body.note ?? null } });
+      const updated = await prisma.bed.update({ where: { id }, data: { status, note: req.body?.note ?? null } });
+      await audit(req, 'BED_STATUS', { targetType: 'Bed', targetId: id, detail: `${bed.status} → ${status}` });
+      return updated;
     }
   );
 }

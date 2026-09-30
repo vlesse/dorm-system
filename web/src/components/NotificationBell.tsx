@@ -43,7 +43,8 @@ export default function NotificationBell() {
   useEffect(() => {
     if (!open) return;
     load().catch(() => {});
-    loadAll().catch(() => {});
+    // 全部通知里有员工验证码、投诉进度这类敏感内容，服务端只对管理员开放
+    if (can('integration:write')) loadAll().catch(() => {});
   }, [open]);
 
   const openItem = async (n: any) => {

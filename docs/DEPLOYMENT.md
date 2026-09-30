@@ -110,7 +110,10 @@ cat > .env <<'EOF'
 DATABASE_URL="file:/opt/dorm-system/data/dorm.db"
 API_PORT=3101
 API_HOST=127.0.0.1
+NODE_ENV=production
 JWT_SECRET=换成你自己的随机串
+# 只有公开演示站才打开：员工登录验证码直接显示在页面上
+# SELF_OTP_ECHO=true
 EOF
 chmod 600 .env
 
@@ -125,8 +128,11 @@ npx prisma generate
 **`API_HOST=127.0.0.1` 很重要**：Node 只监听本机，TLS 由前面的 nginx 终结。
 不这么设的话，`http://服务器IP:3101` 会绕过 HTTPS 直连明文 API。
 
-**`JWT_SECRET` 必须换掉**。不设的话代码会用一个内置默认值 ——
-那意味着任何人都能伪造管理员 token。
+**`JWT_SECRET` 必须换掉**。代码是公开的，内置默认值谁都知道，用它就等于任何人都能伪造管理员 token。
+`NODE_ENV=production` 时没设 `JWT_SECRET` 服务会**直接拒绝启动**，而不是悄悄用默认值。
+
+**`SELF_OTP_ECHO`**：员工自助端的验证码是否直接显示在登录页。生产环境默认关闭，
+只走短信 / WhatsApp 下发；只有公开演示站才应该设成 `true`。
 
 ---
 
@@ -362,6 +368,8 @@ ss -ltnp | grep 3101                                  # 确认只监听 127.0.0.
 - [ ] **改掉所有默认密码**，并把 `mustChangePassword` 打开
       （`server/prisma/seed-platform.ts` 里的 `DEMO_PASSWORD` 是公开演示用的）
 - [ ] **设置独立的 `JWT_SECRET`**，不要用默认值
+- [ ] **确认没有设 `SELF_OTP_ECHO=true`**，并接好短信 / WhatsApp —— 否则员工登录验证码会直接显示在页面上
+- [ ] **每个楼栋宿管账号都勾上管辖楼栋** —— 没有 `space:all` 又没分楼栋的账号什么都看不到（刻意收紧，不是故障）
 - [ ] **换 PostgreSQL**。`schema.prisma` 按 PG 兼容写法书写，改 `provider` 重新迁移即可。
       SQLite 单文件没有主从、没有并发写扩展性，几百人同时在线会成为瓶颈
 - [ ] **配好自动备份并验证能恢复**（第 10 节，恢复演练比备份本身重要）

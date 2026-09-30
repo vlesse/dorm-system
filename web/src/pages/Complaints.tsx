@@ -8,7 +8,7 @@ import {
   PaperClipOutlined, TeamOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { api } from '../api';
+import { api, fetchBlob } from '../api';
 import { useLang } from '../i18n';
 import { useAuth } from '../auth';
 import {
@@ -58,10 +58,15 @@ export default function Complaints() {
 
   const setF = (k: string, v: any) => { setPage(1); setFilters((f) => ({ ...f, [k]: v })); };
 
+  const [comment, setComment] = useState('');
+  const [commentPublic, setCommentPublic] = useState(false);
+
   const openDetail = async (id: number) => {
     setIdentity(null);
-    const d = await api.complaint(id);
-    setDetail(d);
+    setComment('');
+    try {
+      setDetail(await api.complaint(id));
+    } catch (e: any) { message.error(e.message); }
   };
   const refreshAll = async (id?: number) => {
     load(); loadAside();
@@ -116,6 +121,40 @@ export default function Complaints() {
         } catch (e: any) { message.error(e.message); }
       },
     });
+  };
+
+  /** 打开认定弹窗：违规类型预填成该投诉类别的默认违规类型，处理人可以改、也可以清空（清空 = 不开违规单） */
+  const openResolve = () => {
+    form.resetFields();
+    const t = (meta.complaintTypes ?? []).find((x: any) => x.id === detail.typeId);
+    form.setFieldsValue({ outcome: 'SUBSTANTIATED', violationTypeId: t?.violationTypeId ?? undefined });
+    setResolveOpen(true);
+  };
+
+  const doMerge = (into: any) => {
+    modal.confirm({
+      title: `把 ${detail.code} 合并到 ${into.code}？`,
+      content: '合并后本单标为「重复投诉」并指向主单，原始记录不删，不同投诉人数照样按原始条数统计。',
+      onOk: async () => {
+        try { await api.mergeComplaint(detail.id, into.id); message.success('已合并'); await refreshAll(detail.id); }
+        catch (e: any) { message.error(e.message); }
+      },
+    });
+  };
+
+  const doComment = async () => {
+    if (!comment.trim()) return;
+    try {
+      await api.commentComplaint(detail.id, comment.trim(), commentPublic);
+      setComment('');
+      message.success(commentPublic ? '已添加，投诉人可见' : '已添加内部备注');
+      await openDetail(detail.id);
+    } catch (e: any) { message.error(e.message); }
+  };
+
+  const doClose = async () => {
+    try { await api.closeComplaint(detail.id); message.success('已归档'); await refreshAll(detail.id); }
+    catch (e: any) { message.error(e.message); }
   };
 
   const submitResolve = async () => {
@@ -187,7 +226,7 @@ export default function Complaints() {
             onChange={(v) => setF('typeId', v)}
             options={(meta.complaintTypes ?? []).map((t: any) => ({ value: t.id, label: t.nameZh }))} />
           <Select allowClear style={{ width: 140 }} placeholder="状态"
-            onChange={(v) => setF('status', v)}
+            onChange={(v) => { setPage(1); setFilters((f) => ({ ...f, status: v, open: v ? undefined : f.open })); }}
             options={(meta.complaintStatuses ?? []).map((s: string) => ({ value: s, label: L(s) }))} />
           <Select allowClear style={{ width: 130 }} placeholder="是否匿名"
             onChange={(v) => setF('anonymous', v)}
@@ -246,7 +285,8 @@ export default function Complaints() {
               title: '内容', dataIndex: 'description', ellipsis: true,
               render: (v: string, r: any) => (
                 <Space size={4}>
-                  {r.lang !== 'zh' && <Tag style={{ marginInlineEnd: 0 }}>{r.lang.toUpperCase()}</Tag>}
+                  {/* 匿名且没写文字的，服务端不返回 lang —— 否则等于告诉宿管投诉人的国籍 */}
+                  {r.lang && r.lang !== 'zh' && <Tag style={{ marginInlineEnd: 0 }}>{r.lang.toUpperCase()}</Tag>}
                   {r.attachmentCount > 0 && <Tag icon={<PaperClipOutlined />} style={{ marginInlineEnd: 0 }}>{r.attachmentCount}</Tag>}
                   <span>{v}</span>
                 </Space>
@@ -279,10 +319,10 @@ export default function Complaints() {
             {detail.status === 'NEW' && <Button type="primary" onClick={() => doAccept(detail.id)}>受理</Button>}
             {['ACCEPTED'].includes(detail.status) && <Button onClick={() => doInvestigate(detail.id)}>开始核实</Button>}
             {['ACCEPTED', 'INVESTIGATING'].includes(detail.status) && (
-              <Button type="primary" onClick={() => { form.resetFields(); setResolveOpen(true); }}>认定结果</Button>
+              <Button type="primary" onClick={openResolve}>认定结果</Button>
             )}
             {['SUBSTANTIATED', 'UNSUBSTANTIATED'].includes(detail.status) && (
-              <Button onClick={async () => { await api.closeComplaint(detail.id); message.success('已归档'); await refreshAll(detail.id); }}>归档</Button>
+              <Button onClick={doClose}>归档</Button>
             )}
           </Space>
         )}
@@ -294,10 +334,22 @@ export default function Complaints() {
                 message={`同一时段有 ${detail.distinctComplainants} 个不同的人反映这间房`}
                 description="多人独立反映，可信度明显高于单人投诉，建议优先处理。" />
             )}
-            {detail.related?.length > 0 && detail.distinctComplainants < 3 && (
-              <Alert type="info" showIcon style={{ marginBottom: 12 }}
-                message={`另有 ${detail.related.length} 条投诉指向同一房间`}
-                description="如果确认是同一件事，可以在下面合并，原始记录不会丢。" />
+            {detail.related?.length > 0 && (
+              <Card size="small" style={{ marginBottom: 12 }}
+                title={`同一房间、同一类别的其它投诉（${detail.related.length}）`}
+                extra={<span style={{ fontSize: 12, color: '#8c8c8c' }}>确认是同一件事可合并，原始记录不丢</span>}>
+                <Table size="small" rowKey="id" pagination={false} dataSource={detail.related}
+                  columns={[
+                    { title: '编号', dataIndex: 'code', width: 150 },
+                    { title: '发生', dataIndex: 'occurredFrom', width: 110, render: (v: string) => dayjs(v).format('MM-DD HH:mm') },
+                    { title: '状态', dataIndex: 'status', width: 90, render: (v: string) => <Tag color={COMPLAINT_STATUS_COLOR[v]}>{L(v)}</Tag> },
+                    { title: '内容', dataIndex: 'description', ellipsis: true },
+                    ...(can('complaint:write') && ['NEW', 'ACCEPTED', 'INVESTIGATING'].includes(detail.status) ? [{
+                      title: '', width: 90,
+                      render: (_: any, r: any) => <Button size="small" onClick={() => doMerge(r)}>并入此单</Button>,
+                    }] : []),
+                  ]} />
+              </Card>
             )}
 
             <Descriptions size="small" column={2} bordered style={{ marginBottom: 12 }}
@@ -361,15 +413,7 @@ export default function Complaints() {
               <Card size="small" title={<Space size={6}><PaperClipOutlined />现场证据</Space>} style={{ marginBottom: 12 }}>
                 <Space wrap>
                   {detail.attachments.map((a: any) =>
-                    a.kind === 'PHOTO' ? (
-                      <Image key={a.id} src={a.url} width={110} height={110}
-                        style={{ objectFit: 'cover', borderRadius: 4 }} />
-                    ) : (
-                      <Space key={a.id} direction="vertical" size={2}>
-                        <Space size={4} style={{ fontSize: 12, color: '#8c8c8c' }}><SoundOutlined />录音</Space>
-                        <audio controls src={a.url} style={{ height: 32 }} />
-                      </Space>
-                    )
+                    <AuthMedia key={a.id} att={a} />
                   )}
                 </Space>
               </Card>
@@ -404,6 +448,15 @@ export default function Complaints() {
                 }))}
               />
               {(detail.events ?? []).length === 0 && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />}
+              {can('complaint:write') && (
+                <Space.Compact style={{ width: '100%', marginTop: 8 }}>
+                  <Input placeholder="添加备注 / 核实记录" value={comment} onChange={(e) => setComment(e.target.value)}
+                    onPressEnter={doComment} maxLength={1000} />
+                  <Select value={commentPublic} onChange={setCommentPublic} style={{ width: 130 }}
+                    options={[{ value: false, label: '仅内部' }, { value: true, label: '投诉人可见' }]} />
+                  <Button type="primary" onClick={doComment} disabled={!comment.trim()}>添加</Button>
+                </Space.Compact>
+              )}
             </Card>
           </>
         )}
@@ -436,7 +489,7 @@ export default function Complaints() {
                 message="下面选了人才会真的扣分罚款"
                 description="不选人也可以只在房间上记一条 —— 找不到具体责任人时这很常见。" />
               <Form.Item name="violationTypeId" label="转为哪种违规"
-                extra="留空则不生成违规记录，只把投诉标为成立">
+                extra="已按投诉类别预填。清空则不生成违规记录，只把投诉标为成立">
                 <Select allowClear placeholder="选择违规类型"
                   options={meta.violationTypes.map((v: any) => ({
                     value: v.id, label: `${v.nameZh}（扣 ${v.defaultPoints} 分${v.defaultFine > 0 ? ` / 罚 ${v.defaultFine}` : ''}）`,
@@ -462,3 +515,31 @@ const EVENT_LABEL: Record<string, string> = {
   CLOSE: '归档', COMMENT: '备注', MERGE: '合并', WITHDRAW: '撤回',
   REVEAL_IDENTITY: '查看了匿名投诉人身份', RATE: '投诉人评价',
 };
+
+/**
+ * 投诉照片 / 录音。附件接口要鉴权，<img src> / <audio src> 直接请求不带 token 会 401，
+ * 所以先带 token 取成 Blob 再给元素用。
+ */
+function AuthMedia({ att }: { att: any }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [err, setErr] = useState(false);
+  useEffect(() => {
+    let url: string | null = null;
+    fetchBlob(att.url.replace(/^\/api/, ''))
+      .then((b) => { url = URL.createObjectURL(b); setSrc(url); })
+      .catch(() => setErr(true));
+    return () => { if (url) URL.revokeObjectURL(url); };
+  }, [att.url]);
+  if (err) return <Tag color="red">附件加载失败</Tag>;
+  if (att.kind === 'PHOTO') {
+    return src
+      ? <Image src={src} width={110} height={110} style={{ objectFit: 'cover', borderRadius: 4 }} />
+      : <div style={{ width: 110, height: 110, background: '#f5f5f5', borderRadius: 4 }} />;
+  }
+  return (
+    <Space direction="vertical" size={2}>
+      <Space size={4} style={{ fontSize: 12, color: '#8c8c8c' }}><SoundOutlined />录音</Space>
+      {src ? <audio controls src={src} style={{ height: 32 }} /> : <span style={{ fontSize: 12 }}>加载中…</span>}
+    </Space>
+  );
+}

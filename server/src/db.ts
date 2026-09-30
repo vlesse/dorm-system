@@ -23,3 +23,12 @@ export async function getSetting<T>(key: string, fallback: T): Promise<T> {
     return fallback;
   }
 }
+
+/**
+ * 分页参数。`?page=abc` 这种会变成 NaN 传给 Prisma 直接 500，这里统一兜住。
+ */
+export function paging(q: Record<string, any>, defaultSize = 20, maxSize = 200) {
+  const page = Math.max(1, Math.floor(Number(q.page)) || 1);
+  const pageSize = Math.min(Math.max(1, Math.floor(Number(q.pageSize)) || defaultSize), maxSize);
+  return { page, pageSize };
+}

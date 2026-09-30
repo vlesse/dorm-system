@@ -17,7 +17,8 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(BASE + path, {
     ...init,
     headers: {
-      'Content-Type': 'application/json',
+      // 只有带 body 才声明 JSON：DELETE / 无参 PUT 带着这个头，Fastify 会以「JSON body 为空」直接回 400
+      ...(init?.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init?.headers ?? {}),
     },
@@ -27,7 +28,9 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     onUnauthenticated?.();
   }
   const text = await res.text();
-  const body = text ? JSON.parse(text) : null;
+  // nginx 502 / 504 回的是 HTML，直接 JSON.parse 会把真正的错误变成一句看不懂的 SyntaxError
+  let body: any = null;
+  try { body = text ? JSON.parse(text) : null; } catch { body = { error: `服务暂时不可用（HTTP ${res.status}）` }; }
   if (!res.ok) {
     const err = new Error(body?.error ?? res.statusText) as Error & { status: number; body: any };
     err.status = res.status;

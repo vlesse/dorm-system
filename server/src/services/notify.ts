@@ -126,7 +126,18 @@ export interface NotifyTarget {
   userId?: number;
   /** 通知某个角色的全部账号，如把工单派给 WARDEN */
   roleCode?: string;
+  /**
+   * 配合 roleCode：只通知管这栋楼的人（有 space:all 的不受限）。
+   * 不带的话，A 栋一条报修会推给全园区八栋楼的宿管 ——
+   * 投诉更严重，别栋宿管会收到本不该看到的投诉编号和位置。
+   */
+  buildingId?: number | null;
 }
+
+const hasAll = (perms: string) => {
+  const p = perms.split(',').map((x) => x.trim());
+  return p.includes('*') || p.includes('space:all');
+};
 
 /**
  * 发通知。业务代码只调这个。
@@ -171,9 +182,12 @@ export async function notify(
   if (target.roleCode) {
     const us = await prisma.user.findMany({
       where: { isActive: true, role: { code: target.roleCode } },
-      include: { identities: true },
+      include: { identities: true, role: true, buildings: true },
     });
-    for (const u of us) {
+    const scoped = target.buildingId != null
+      ? us.filter((u) => hasAll(u.role.permissions) || u.buildings.some((b) => b.buildingId === target.buildingId))
+      : us;
+    for (const u of scoped) {
       const addresses: Record<string, string> = {};
       for (const b of u.identities) if (b.isActive) addresses[b.provider] = b.externalId;
       if (u.phone) { addresses.SMS ??= u.phone; addresses.WHATSAPP ??= u.phone; }

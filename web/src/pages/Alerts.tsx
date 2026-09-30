@@ -306,7 +306,7 @@ export default function Alerts() {
           extra={s.extra}
         >
           {s.hint && <A type={s.level} showIcon style={{ marginBottom: 10 }} message={s.hint} />}
-          <Table size="small" rowKey={(r: any, i) => r.id ?? r.personId ?? r.occupancyId ?? r.roomId ?? i}
+          <Table size="small" rowKey={(r: any) => [r.id, r.occupancyId, r.personId, r.roomId, r.issue, r.code].filter((v) => v != null).join('-')}
             pagination={s.rows.length > 10 ? { pageSize: 10, size: 'small' } : false}
             dataSource={s.rows} columns={s.columns} />
         </Card>

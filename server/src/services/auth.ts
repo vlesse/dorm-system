@@ -13,7 +13,12 @@ import { prisma } from '../db.js';
  *   - 员工本人 Person —— 不发账号密码，只走企业平台身份或手机验证码（见 IdentityBinding）
  */
 
-const SECRET = process.env.JWT_SECRET ?? 'dorm-system-dev-secret-change-in-production';
+const DEV_SECRET = 'dorm-system-dev-secret-change-in-production';
+const SECRET = process.env.JWT_SECRET ?? DEV_SECRET;
+// 代码是公开的，默认密钥谁都知道 —— 生产环境没配就拒绝启动，而不是悄悄用默认值让人伪造管理员 token
+if (process.env.NODE_ENV === 'production' && SECRET === DEV_SECRET) {
+  throw new Error('生产环境必须设置 JWT_SECRET（openssl rand -hex 32），否则任何人都能伪造登录凭证');
+}
 const TOKEN_TTL_SECONDS = 12 * 3600; // 宿管一个班次的长度
 
 const b64url = (buf: Buffer | string) =>
@@ -45,8 +50,10 @@ export function verifyToken(token: string): TokenPayload | null {
   const [header, body, sig] = parts;
   const expected = b64url(crypto.createHmac('sha256', SECRET).update(`${header}.${body}`).digest());
   // 定长比较，避免时序侧信道
-  if (sig.length !== expected.length) return null;
-  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+  // 按字节比：签名里混进非 ASCII 字符时字符串长度相等但字节长度不等，timingSafeEqual 会直接抛错
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
   try {
     const payload = JSON.parse(b64urlDecode(body).toString()) as TokenPayload;
     if (payload.exp * 1000 < Date.now()) return null;
@@ -81,9 +88,15 @@ export function verifyPassword(plain: string, stored: string | null): boolean {
 export function hasPermission(perms: string[], needed: string): boolean {
   if (perms.includes('*')) return true;
   if (perms.includes(needed)) return true;
+  // 敏感权限点不被模块通配符覆盖：给某个角色 `complaint:*` 是为了让他处理投诉，
+  // 不应该顺带就能揭开匿名投诉人 —— 这种权限必须逐个显式授予
+  if (EXPLICIT_ONLY.includes(needed)) return false;
   const [mod] = needed.split(':');
   return perms.includes(`${mod}:*`);
 }
+
+/** 只能显式授予、不随 `模块:*` 下发的权限点（`*` 超级管理员仍然有） */
+export const EXPLICIT_ONLY = ['complaint:identity'];
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -96,7 +109,16 @@ export async function attachAuth(req: FastifyRequest) {
   const header = req.headers.authorization;
   if (!header?.startsWith('Bearer ')) return;
   const payload = verifyToken(header.slice(7));
-  if (payload) req.auth = payload;
+  if (!payload) return;
+  // token 是无状态的，停用账号 / 员工离职后如果不查一下，旧 token 还能用满 12 小时
+  if (payload.kind === 'USER') {
+    const u = await prisma.user.findUnique({ where: { id: payload.sub }, select: { isActive: true } });
+    if (!u?.isActive) return;
+  } else {
+    const p = await prisma.person.findUnique({ where: { id: payload.sub }, select: { employmentStatus: true } });
+    if (!p || p.employmentStatus === 'RESIGNED') return;
+  }
+  req.auth = payload;
 }
 
 /** 需要登录 */
@@ -120,11 +142,77 @@ export function requirePerm(perm: string) {
 /**
  * 数据范围：楼栋宿管只看自己那几栋楼。
  * 返回 null 表示不限（看全部）。
+ *
+ * **失败即收紧**：没有 space:all、又没分配任何楼栋的账号，返回空数组 = 什么都看不到。
+ * 以前这里返回 null（看全部），新建一个宿管账号忘了勾楼栋，他就能看全园区。
  */
 export function buildingScope(req: FastifyRequest): number[] | null {
-  if (!req.auth) return null;
+  if (!req.auth) return [];
   if (hasPermission(req.auth.perms, 'space:all')) return null;
-  return req.auth.buildings.length > 0 ? req.auth.buildings : null;
+  return req.auth.buildings;
+}
+
+/** 某栋楼在不在当前用户的范围内 */
+export const inBuildingScope = (req: FastifyRequest, buildingId: number | null | undefined) => {
+  const scope = buildingScope(req);
+  return !scope || (buildingId != null && scope.includes(buildingId));
+};
+
+/** 按房间 / 床位反查楼栋再判断范围。不存在也返回 false，调用方统一回 404 */
+export async function roomInScope(req: FastifyRequest, roomId: number) {
+  const scope = buildingScope(req);
+  const r = await prisma.room.findUnique({ where: { id: roomId }, select: { floor: { select: { buildingId: true } } } });
+  if (!r) return false;
+  return !scope || scope.includes(r.floor.buildingId);
+}
+export async function bedInScope(req: FastifyRequest, bedId: number) {
+  const b = await prisma.bed.findUnique({ where: { id: bedId }, select: { roomId: true } });
+  return b ? roomInScope(req, b.roomId) : false;
+}
+export async function floorInScope(req: FastifyRequest, floorId: number) {
+  const scope = buildingScope(req);
+  const f = await prisma.floor.findUnique({ where: { id: floorId }, select: { buildingId: true } });
+  if (!f) return false;
+  return !scope || scope.includes(f.buildingId);
+}
+
+/**
+ * 范围内的房间 / 楼层 id。工单、查寝这类用 scopeType + scopeId 多态挂位置的表，
+ * 没法用关联过滤，只能先把 id 算出来再 in。
+ */
+export async function scopeIds(scope: number[]) {
+  const floors = await prisma.floor.findMany({ where: { buildingId: { in: scope } }, select: { id: true } });
+  const floorIds = floors.map((f) => f.id);
+  const rooms = await prisma.room.findMany({ where: { floorId: { in: floorIds } }, select: { id: true } });
+  return { buildingIds: scope, floorIds, roomIds: rooms.map((r) => r.id) };
+}
+
+/** 多态位置（ROOM / FLOOR / BUILDING + scopeId）的范围条件 */
+export async function polyScopeWhere(scope: number[] | null) {
+  if (!scope) return {};
+  const ids = await scopeIds(scope);
+  return {
+    OR: [
+      { scopeType: 'ROOM', scopeId: { in: ids.roomIds } },
+      { scopeType: 'FLOOR', scopeId: { in: ids.floorIds } },
+      { scopeType: 'BUILDING', scopeId: { in: ids.buildingIds } },
+    ],
+  };
+}
+
+/**
+ * 人员的范围条件：住在范围内的楼，或者还没分配床位的人。
+ * 后者必须放进来 —— 新员工还没有床，宿管得能搜到他才能给他排宿。
+ */
+export function personScopeWhere(scope: number[] | null): any {
+  if (!scope) return {};
+  const LIVE = ['ACTIVE', 'HELD', 'RESERVED'];
+  return {
+    OR: [
+      { occupancies: { some: { status: { in: LIVE }, bed: { room: { floor: { buildingId: { in: scope } } } } } } },
+      { occupancies: { none: { status: { in: LIVE } } } },
+    ],
+  };
 }
 
 /** 把楼栋范围拼进 Prisma where —— 各表到 building 的路径不同，这里统一 */
@@ -193,8 +281,7 @@ export async function issueTokenForUser(userId: number) {
  * 这样即使 token 泄漏也只能看自己那点数据，碰不到管理端接口。
  */
 export async function issueTokenForPerson(personId: number) {
-  const { prisma: db } = await import('../db.js');
-  const person = await db.person.findUnique({ where: { id: personId } });
+  const person = await prisma.person.findUnique({ where: { id: personId } });
   if (!person || person.employmentStatus === 'RESIGNED') return null;
   return {
     token: signToken({

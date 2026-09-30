@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Card, Table, Select, Space, Button, Tag, Statistic, Row, Col, Alert } from 'antd';
+import { Card, Table, Select, Space, Button, Tag, Statistic, Row, Col, Alert, message as antdMessage } from 'antd';
 import { DownloadOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { useT, useLang } from '../i18n';
@@ -54,7 +54,8 @@ export default function Roster() {
           <Select allowClear style={{ width: 130 }} placeholder={t('personType')} value={f.personType}
             onChange={(v) => setF((x) => ({ ...x, personType: v }))}
             options={meta.personTypes.map((s: string) => ({ value: s, label: labelOf(PERSON_TYPE_LABEL, s, lang) }))} />
-          <Button type="primary" icon={<DownloadOutlined />} href={api.rosterCsvUrl(f)}>{t('export')}</Button>
+          <Button type="primary" icon={<DownloadOutlined />}
+            onClick={() => api.downloadRosterCsv(f).catch((e) => antdMessage.error(e.message))}>{t('export')}</Button>
         </Space>
       </Card>
 

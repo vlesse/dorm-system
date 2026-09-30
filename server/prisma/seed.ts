@@ -20,6 +20,7 @@ import { wipeAll } from './seed-lib.js';
 import { seedDict, loadDict } from './seed-dict.js';
 import { seedImipOrg, seedImipSpace } from './seed-imip.js';
 import { seedDemo } from './seed-demo.js';
+import { seedPlatformDict } from './seed-platform.js';
 
 const prisma = new PrismaClient();
 const BLANK = process.argv.includes('--blank');
@@ -47,11 +48,12 @@ async function main() {
 
   console.log('写入配置字典…');
   await seedDict(prisma);
+  await seedPlatformDict(prisma);
 
   if (BLANK) {
     const password = await seedAdmin();
     console.log('\n空系统已就绪。');
-    console.log('  已写入通用字典：国籍 / 职级 / 班次 / 宗教 / 房型 18 种 / 物品 / 违规 / 工单类别 / 投诉类别 / 角色 / 排宿规则');
+    console.log('  已写入通用字典：国籍 / 职级 / 班次 / 宗教 / 房型 18 种 / 物品 / 违规 / 工单类别 / 投诉类别 / 角色 / 排宿规则 / 通知模板 / 集成占位');
     console.log('  未写入任何楼栋、人员、运营数据');
     console.log('\n  管理员账号：admin');
     console.log(`  初始密码：  ${password}    ← 只显示这一次，首次登录强制改密`);

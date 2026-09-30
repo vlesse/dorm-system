@@ -1,7 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma, getSetting } from '../db.js';
 import { nextLeaveDue } from './persons.js';
-import { buildingScope } from '../services/auth.js';
+import type { FastifyRequest } from 'fastify';
+import { buildingScope, hasPermission, personScopeWhere, polyScopeWhere } from '../services/auth.js';
+import { complaintScope } from '../services/complaints.js';
 
 const LIVE = ['ACTIVE', 'HELD', 'RESERVED'];
 const OUT_OF_SERVICE = ['MAINTENANCE', 'LOCKED', 'DISABLED'];
@@ -130,14 +132,14 @@ export default async function reportRoutes(app: FastifyInstance) {
         include: { category: true },
       }),
       prisma.violation.count({ where: { status: 'OPEN', ...(scopedRoomIds ? { roomId: { in: scopedRoomIds } } : {}) } }),
-      prisma.visitor.count({ where: { status: 'IN' } }),
-      prisma.request.count({ where: { status: 'PENDING' } }),
+      prisma.visitor.count({ where: { status: 'IN', ...visitorScopeWhere(scope) } }),
+      prisma.request.count({ where: { status: 'PENDING', person: personScopeWhere(scope) } }),
     ]);
     const woOverdue = woOverdueRaw.filter(
       (w) => Date.now() > w.reportedAt.getTime() + w.category.slaHours * 3600000
     ).length;
 
-    const alerts = await computeAlerts(scope);
+    const alerts = await computeAlerts(req);
     const alertCounts = Object.fromEntries(
       Object.entries(alerts).filter(([, v]) => Array.isArray(v)).map(([k, v]) => [k, (v as any[]).length])
     );
@@ -159,7 +161,7 @@ export default async function reportRoutes(app: FastifyInstance) {
   });
 
   /** 待办告警 */
-  app.get('/api/alerts', async (req) => computeAlerts(buildingScope(req)));
+  app.get('/api/alerts', async (req) => computeAlerts(req));
 
   /** 在住花名册 */
   app.get<{ Querystring: Record<string, string | undefined> }>('/api/roster', async (req) =>
@@ -196,9 +198,12 @@ export default async function reportRoutes(app: FastifyInstance) {
   app.get<{ Querystring: { buildingId?: string } }>('/api/evacuation', async (req) => {
     const scope = buildingScope(req);
     const buildings = await prisma.building.findMany({
+      // 两个条件要 AND：以前用对象展开合并，范围条件把 buildingId 盖掉了，选了楼栋还是出全部
       where: {
-        ...(req.query.buildingId ? { id: Number(req.query.buildingId) } : {}),
-        ...(scope ? { id: { in: scope } } : {}),
+        AND: [
+          req.query.buildingId ? { id: Number(req.query.buildingId) } : {},
+          scope ? { id: { in: scope } } : {},
+        ],
       },
       orderBy: { sortOrder: 'asc' },
       include: {
@@ -243,13 +248,16 @@ export default async function reportRoutes(app: FastifyInstance) {
 }
 
 async function rosterRows(q: Record<string, string | undefined>, scope: number[] | null = null) {
-  const where: any = { status: { in: LIVE } };
-  if (scope) where.bed = { room: { floor: { buildingId: { in: scope } } } };
-  if (q.floorId) where.bed = { room: { floorId: Number(q.floorId) } };
-  else if (q.buildingId) where.bed = { room: { floor: { buildingId: Number(q.buildingId) } } };
-  if (q.nationalityId) where.person = { ...(where.person ?? {}), nationalityId: q.nationalityId };
-  if (q.personType) where.person = { ...(where.person ?? {}), personType: q.personType };
-  if (q.roomTypeId) where.bed = { ...(where.bed ?? {}), room: { ...(where.bed?.room ?? {}), roomTypeId: Number(q.roomTypeId) } };
+  // 每个条件单独进 AND。以前是往同一个 where.bed 上反复赋值，
+  // 带上 ?buildingId= 或 ?floorId= 就把楼栋范围整个覆盖掉 —— A 栋宿管能导出别栋的花名册（含证件号、电话）
+  const and: any[] = [{ status: { in: LIVE } }];
+  if (scope) and.push({ bed: { room: { floor: { buildingId: { in: scope } } } } });
+  if (q.floorId) and.push({ bed: { room: { floorId: Number(q.floorId) } } });
+  else if (q.buildingId) and.push({ bed: { room: { floor: { buildingId: Number(q.buildingId) } } } });
+  if (q.nationalityId) and.push({ person: { nationalityId: q.nationalityId } });
+  if (q.personType) and.push({ person: { personType: q.personType } });
+  if (q.roomTypeId) and.push({ bed: { room: { roomTypeId: Number(q.roomTypeId) } } });
+  const where = { AND: and };
 
   const rows = await prisma.occupancy.findMany({
     where,
@@ -285,7 +293,8 @@ async function rosterRows(q: Record<string, string | undefined>, scope: number[]
 /**
  * 全部待办告警。每一条都是实际运营里会出问题、而且不查就发现不了的地方。
  */
-async function computeAlerts(scope: number[] | null = null) {
+async function computeAlerts(req: FastifyRequest) {
+  const scope = buildingScope(req);
   const [warningDays, idWarnDays, staleDays, pointsThreshold] = await Promise.all([
     getSetting<number>('leave.warningDays', 30),
     getSetting<number>('id.expiryWarningDays', 90),
@@ -348,6 +357,7 @@ async function computeAlerts(scope: number[] | null = null) {
         { status: 'ACTIVE', person: { employmentStatus: 'ON_LEAVE' } },
         { status: 'HELD', person: { employmentStatus: 'ACTIVE' } },
       ],
+      ...(bedScope ? { bed: bedScope } : {}),
     },
     include: { person: true, bed: true },
   });
@@ -365,7 +375,7 @@ async function computeAlerts(scope: number[] | null = null) {
 
   // 6. 报修工单超期未完成
   const openWO = await prisma.workOrder.findMany({
-    where: { status: { in: ['NEW', 'ASSIGNED', 'IN_PROGRESS'] } },
+    where: { status: { in: ['NEW', 'ASSIGNED', 'IN_PROGRESS'] }, ...(await polyScopeWhere(scope)) },
     include: { category: true },
   });
   const workOrderOverdue = openWO
@@ -382,7 +392,7 @@ async function computeAlerts(scope: number[] | null = null) {
   // 7. 违规积分超阈值
   const vioGroups = await prisma.violation.groupBy({
     by: ['personId'],
-    where: { status: { in: ['OPEN', 'HANDLED'] }, personId: { not: null } },
+    where: { status: { in: ['OPEN', 'HANDLED'] }, personId: { not: null }, ...(scope ? { person: personInScope } : {}) },
     _sum: { points: true, fine: true },
     _count: true,
   });
@@ -450,7 +460,7 @@ async function computeAlerts(scope: number[] | null = null) {
   }
   // 已核验配偶但没住同一间房
   const spouseRels = await prisma.relationship.findMany({
-    where: { type: 'SPOUSE', verified: true },
+    where: { type: 'SPOUSE', verified: true, ...(scope ? { OR: [{ person: personInScope }, { related: personInScope }] } : {}) },
     include: {
       person: { include: { occupancies: { where: { status: { in: LIVE } }, include: { bed: true } } } },
       related: { include: { occupancies: { where: { status: { in: LIVE } }, include: { bed: true } } } },
@@ -491,7 +501,7 @@ async function computeAlerts(scope: number[] | null = null) {
 
   // 13. 访客超期未离开
   const visitorOverstay = (await prisma.visitor.findMany({
-    where: { status: 'IN', expectedOutAt: { not: null, lt: new Date() } },
+    where: { status: 'IN', expectedOutAt: { not: null, lt: new Date() }, ...visitorScopeWhere(scope) },
     include: { hostPerson: true },
   })).map((v) => ({
     id: v.id, code: v.code, name: v.name, host: v.hostPerson.name,
@@ -501,7 +511,7 @@ async function computeAlerts(scope: number[] | null = null) {
 
   // 14. 待审批申请堆积
   const pendingRequests = (await prisma.request.findMany({
-    where: { status: 'PENDING' },
+    where: { status: 'PENDING', person: personScopeWhere(scope) },
     include: { person: true },
     orderBy: { submittedAt: 'asc' },
   })).map((r) => ({
@@ -527,18 +537,11 @@ async function computeAlerts(scope: number[] | null = null) {
   // 16. 投诉超时未处理
   // 投诉和报修不一样：报修晚一天是难受，投诉晚一天是「反映了没人管」，
   // 下一次这个人就不会再用这个渠道了。所以 SLA 卡得比报修紧。
-  const complaintsOpen = await prisma.complaint.findMany({
-    where: {
-      status: { in: ['NEW', 'ACCEPTED', 'INVESTIGATING'] },
-      ...(scope
-        ? {
-            OR: [
-              { targetRoom: { floor: { buildingId: { in: scope } } } },
-              { targetFloor: { buildingId: { in: scope } } },
-            ],
-          }
-        : {}),
-    },
+  // 投诉告警必须和投诉列表走同一个收口（complaintScope）。以前这里只按楼栋过滤，
+  // 「投诉宿舍管理服务」这类绕开宿管的投诉超时了，会出现在被投诉宿管自己的告警页上
+  const canComplaint = hasPermission(req.auth?.perms ?? [], 'complaint:read');
+  const complaintsOpen = !canComplaint ? [] : await prisma.complaint.findMany({
+    where: { AND: [{ status: { in: ['NEW', 'ACCEPTED', 'INVESTIGATING'] } }, complaintScope(req)] },
     include: {
       type: true,
       targetRoom: { include: { floor: { include: { building: true } } } },
@@ -567,12 +570,13 @@ async function computeAlerts(scope: number[] | null = null) {
   // 所以这里按【不同投诉人数】判，不按条数判 —— 条数会被一个人刷出来。
   const hotWindowDays = await getSetting<number>('complaint.hotRoomWindowDays', 30);
   const hotThreshold = await getSetting<number>('complaint.repeatThreshold', 3);
-  const recentComplaints = await prisma.complaint.findMany({
+  const recentComplaints = !canComplaint ? [] : await prisma.complaint.findMany({
     where: {
-      submittedAt: { gte: new Date(Date.now() - hotWindowDays * 86400000) },
-      targetRoomId: { not: null },
-      status: { notIn: ['WITHDRAWN', 'DUPLICATE'] },
-      ...(scope ? { targetRoom: { floor: { buildingId: { in: scope } } } } : {}),
+      AND: [complaintScope(req), {
+        submittedAt: { gte: new Date(Date.now() - hotWindowDays * 86400000) },
+        targetRoomId: { not: null },
+        status: { notIn: ['WITHDRAWN', 'DUPLICATE'] },
+      }],
     },
     include: { targetRoom: { include: { floor: { include: { building: true } } } }, type: true },
   });
@@ -643,5 +647,16 @@ async function computeAlerts(scope: number[] | null = null) {
     complaintOverdue,
     complaintHotRooms,
     itemsNotReturned,
+  };
+}
+
+/** 访客的范围：登记的房间在范围内，或没登记房间但被访人住在范围内 */
+function visitorScopeWhere(scope: number[] | null): any {
+  if (!scope) return {};
+  return {
+    OR: [
+      { room: { floor: { buildingId: { in: scope } } } },
+      { roomId: null, hostPerson: { occupancies: { some: { status: { in: LIVE }, bed: { room: { floor: { buildingId: { in: scope } } } } } } } },
+    ],
   };
 }

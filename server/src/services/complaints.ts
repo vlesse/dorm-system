@@ -85,7 +85,10 @@ export function serializeComplaint(c: any) {
     occurredFrom: c.occurredFrom,
     occurredTo: c.occurredTo,
     description: c.description,
-    lang: c.lang,
+    // lang 是按投诉人国籍推出来的，不是从文字识别的。匿名投诉没写文字时，
+    // 它就只剩一个作用：告诉宿管「投诉人是印尼籍 / 中方」—— 在两千多人的园区里足够缩小到几个人。
+    // 有文字的时候语言本来就看得出来，这时才给。
+    lang: anonymous && !c.description ? null : c.lang,
     status: c.status,
     priority: c.priority,
     handledBy: c.handledBy,

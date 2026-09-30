@@ -31,9 +31,12 @@ export function can(perms: string[] | undefined, needed: string): boolean {
   if (!perms) return false;
   if (perms.includes('*')) return true;
   if (perms.includes(needed)) return true;
+  // 与后端 EXPLICIT_ONLY 保持一致：敏感权限点不随 `模块:*` 下发
+  if (EXPLICIT_ONLY.includes(needed)) return false;
   const [mod] = needed.split(':');
   return perms.includes(`${mod}:*`);
 }
+const EXPLICIT_ONLY = ['complaint:identity'];
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<CurrentUser | null>(null);

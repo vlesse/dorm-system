@@ -146,14 +146,7 @@ export async function seedDict(prisma: PrismaClient) {
   });
 
   await prisma.role.createMany({
-    data: [
-      { code: 'ADMIN', nameZh: '系统管理员', nameEn: 'System Admin', nameId: 'Admin Sistem', permissions: '*' },
-      { code: 'DORM_MANAGER', nameZh: '宿舍主管', nameEn: 'Dormitory Manager', nameId: 'Manajer Asrama', permissions: 'space:*,person:*,allocation:*,report:*,workorder:*,violation:*,inspection:*' },
-      { code: 'WARDEN', nameZh: '楼栋宿管', nameEn: 'Building Warden', nameId: 'Pengelola Gedung', permissions: 'space:read,person:read,allocation:*,workorder:*,violation:create,inspection:*,visitor:*' },
-      { code: 'HR', nameZh: '人力资源', nameEn: 'HR', nameId: 'SDM', permissions: 'person:*,report:read' },
-      { code: 'EHS', nameZh: '安全环保', nameEn: 'EHS', nameId: 'K3', permissions: 'report:read,violation:*,inspection:*' },
-      { code: 'VIEWER', nameZh: '只读查看', nameEn: 'Viewer', nameId: 'Pembaca', permissions: 'report:read,space:read' },
-    ],
+    data: Object.entries(ROLES).map(([code, r]) => ({ code, ...r })),
   });
 
   // 投诉类别。routeTo 是这张表里最关键的字段：
@@ -192,6 +185,13 @@ export async function seedDict(prisma: PrismaClient) {
         slaHours: 48, allowAnonymous: true, routeTo: 'WARDEN', severity: 'LOW', sortOrder: 99 },
     ],
   });
+
+  // 投诉类别 → 认定成立时默认转成的违规类型。认定弹窗会预填这一项，处理人可改可清空。
+  // 财物丢失、肢体冲突、歧视、投诉宿管这些不是「违反宿舍规定」，不设默认，要开单由处理人自己选
+  const vtIds = new Map((await prisma.violationType.findMany()).map((v) => [v.code, v.id]));
+  for (const [ct, vt] of Object.entries(COMPLAINT_TO_VIOLATION)) {
+    if (vtIds.has(vt)) await prisma.complaintType.updateMany({ where: { code: ct }, data: { violationTypeId: vtIds.get(vt) } });
+  }
 
   await prisma.settingItem.createMany({
     data: [
@@ -235,3 +235,41 @@ export async function loadDict(prisma: PrismaClient): Promise<Dict> {
     rtByCode, lvByCode, relByCode,
   };
 }
+
+/**
+ * 角色与权限点 —— **唯一的一份**。
+ * 以前这里是一套旧口径，seed-platform 再覆盖成新口径；结果 `db:seed:blank` 开通的空系统
+ * 只跑这里、拿到的是旧口径（宿舍主管没有 space:all、宿管没有任何投诉权限）。
+ *
+ * 权限点 `模块:动作`，`*` 全部，`模块:*` 模块内全部。
+ * 注意 complaint:identity 不随 `complaint:*` 下发，必须显式写（见 services/auth.ts EXPLICIT_ONLY）。
+ */
+export const ROLES: Record<string, { nameZh: string; nameEn: string; nameId: string; permissions: string }> = {
+  ADMIN: { nameZh: '系统管理员', nameEn: 'System Admin', nameId: 'Admin Sistem', permissions: '*' },
+  // 宿舍主管能揭示匿名投诉人（核实、回访需要），但每次都写审计
+  DORM_MANAGER: {
+    nameZh: '宿舍主管', nameEn: 'Dormitory Manager', nameId: 'Manajer Asrama',
+    permissions: 'space:*,space:all,person:*,allocation:*,report:*,workorder:*,violation:*,inspection:*,visitor:*,request:*,item:*,complaint:*,complaint:identity,config:write,config:read,user:read,audit:read',
+  },
+  // 楼栋宿管：没有 space:all → 只看自己楼栋；能管房间 / 床位状态，改不了国籍分区、房型和核定人数
+  // 投诉只给 read + write：没有 complaint:all 看不到「投诉宿管本人」那类，没有 complaint:identity 揭不开匿名
+  WARDEN: {
+    nameZh: '楼栋宿管', nameEn: 'Building Warden', nameId: 'Pengelola Gedung',
+    permissions: 'space:read,space:room,person:read,allocation:*,workorder:*,violation:create,violation:read,inspection:*,visitor:*,request:read,item:*,complaint:read,complaint:write,report:read',
+  },
+  HR: {
+    nameZh: '人力资源', nameEn: 'HR', nameId: 'SDM',
+    permissions: 'person:*,report:read,space:read,space:all,request:read,complaint:read,complaint:all,complaint:identity,audit:read',
+  },
+  // EHS 处理安全类投诉，但不揭示匿名投诉人 —— 那是主管 / HR 的事
+  EHS: {
+    nameZh: '安全环保', nameEn: 'EHS', nameId: 'K3',
+    permissions: 'report:read,space:read,space:all,person:read,violation:*,inspection:*,workorder:read,complaint:read,complaint:write,complaint:all',
+  },
+  VIEWER: { nameZh: '只读查看', nameEn: 'Viewer', nameId: 'Pembaca', permissions: 'report:read,space:read,space:all,person:read' },
+};
+
+export const COMPLAINT_TO_VIOLATION: Record<string, string> = {
+  NOISE: 'NOISE', HYGIENE: 'HYGIENE', ALCOHOL: 'ALCOHOL', SMOKING: 'SMOKING',
+  GUEST: 'OVERNIGHT_GUEST', FACILITY: 'DAMAGE',
+};

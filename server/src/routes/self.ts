@@ -6,7 +6,7 @@ import { prisma } from '../db.js';
 import { issueTokenForPerson, requireSelf } from '../services/auth.js';
 import { notify } from '../services/notify.js';
 import { nextCode } from '../services/space.js';
-import { checkAbuse, logEvent, getSetting } from '../services/complaints.js';
+import { checkAbuse, logEvent, getSetting, findRelated } from '../services/complaints.js';
 import { UPLOAD_DIR } from './complaints.js';
 import { nextLeaveDue } from './persons.js';
 
@@ -24,6 +24,28 @@ import { nextLeaveDue } from './persons.js';
 const LIVE = ['ACTIVE', 'HELD', 'RESERVED'];
 const OTP_TTL_MINUTES = 10;
 const OTP_MAX_ATTEMPTS = 5;
+/** 同一工号每小时最多申请几次验证码。不限的话每次换新码再猜 5 次，等于没限 */
+const OTP_MAX_PER_HOUR = 5;
+
+/**
+ * 验证码回显开关。
+ *
+ * 以前的逻辑是「短信 / WhatsApp 没启用，或者这个人没登记手机号」就把验证码直接返回 ——
+ * 生产环境只要有一个员工没填手机号，谁输他的工号就能登进去。
+ * 现在只看显式开关：SELF_OTP_ECHO=true（演示站），或者非生产环境且没显式关掉。
+ */
+const otpEcho = () =>
+  process.env.SELF_OTP_ECHO === 'true' ||
+  (process.env.NODE_ENV !== 'production' && process.env.SELF_OTP_ECHO !== 'false');
+
+/** 员工当前住的楼 —— 通知只推给这栋楼的宿管 */
+async function buildingOfPerson(personId: number) {
+  const occ = await prisma.occupancy.findFirst({
+    where: { personId, status: { in: LIVE } },
+    select: { bed: { select: { room: { select: { floor: { select: { buildingId: true } } } } } } },
+  });
+  return occ?.bed.room.floor.buildingId ?? null;
+}
 
 /** 员工自助端能提的申请类型 —— 有意不含「入住」，那是宿管的事 */
 const SELF_REQUEST_TYPES = ['TRANSFER', 'CHECKOUT', 'COUPLE_ROOM', 'VISITOR_OVERNIGHT', 'EXTRA_BED'];
@@ -52,31 +74,32 @@ export default async function selfRoutes(app: FastifyInstance) {
     if (!employeeNo) return reply.code(400).send({ error: '请输入工号' });
 
     const person = await prisma.person.findUnique({ where: { employeeNo } });
-    const code = String(crypto.randomInt(100000, 999999));
+    const code = String(crypto.randomInt(100000, 1000000));
     const expiresAt = new Date(Date.now() + OTP_TTL_MINUTES * 60000);
-
-    // 检查下发渠道是否可用
-    const channels = await prisma.integration.findMany({
-      where: { provider: { in: ['SMS', 'WHATSAPP'] }, enabled: true },
-    });
-    const canDeliver = channels.length > 0 && !!person?.phone;
+    const echo = otpEcho();
 
     if (person && person.employmentStatus !== 'RESIGNED') {
+      const recent = await prisma.otpCode.count({
+        where: { employeeNo, createdAt: { gte: new Date(Date.now() - 3600000) } },
+      });
+      if (recent >= OTP_MAX_PER_HOUR) {
+        return reply.code(429).send({ error: '验证码申请过于频繁，请一小时后再试' });
+      }
       await prisma.otpCode.create({
         data: { target: person.phone ?? employeeNo, employeeNo, code, personId: person.id, expiresAt },
       });
       await notify('SELF_OTP', { personId: person.id }, { code, minutes: OTP_TTL_MINUTES });
     }
 
+    // 工号存不存在，返回体长得一样（手机号掩码只在回显模式下给）—— 不泄漏「这个工号在不在册」
     return {
       ok: true,
       expiresInMinutes: OTP_TTL_MINUTES,
-      maskedPhone: person?.phone ? person.phone.replace(/(\d{2})\d+(\d{4})$/, '$1****$2') : null,
-      /** 没有可用下发渠道时才回显验证码，并明确告知原因 */
-      devFallback: !canDeliver,
-      devCode: !canDeliver && person ? code : undefined,
-      devHint: !canDeliver
-        ? '短信 / WhatsApp 渠道尚未启用（设置 → 集成对接），验证码暂时直接显示。接入后此处不再回显。'
+      maskedPhone: echo && person?.phone ? maskPhone(person.phone) : null,
+      devFallback: echo,
+      devCode: echo && person && person.employmentStatus !== 'RESIGNED' ? code : undefined,
+      devHint: echo
+        ? '演示模式：验证码直接显示在这里（服务端开启了 SELF_OTP_ECHO）。正式环境关掉后只走短信 / WhatsApp 下发。'
         : undefined,
     };
   });
@@ -96,10 +119,15 @@ export default async function selfRoutes(app: FastifyInstance) {
     }
     if (otp.code !== code) {
       await prisma.otpCode.update({ where: { id: otp.id }, data: { attempts: { increment: 1 } } });
-      return reply.code(400).send({ error: '验证码不正确', remaining: OTP_MAX_ATTEMPTS - otp.attempts - 1 });
+      return reply.code(400).send({ error: '验证码不正确', remaining: Math.max(0, OTP_MAX_ATTEMPTS - otp.attempts - 1) });
     }
 
-    await prisma.otpCode.update({ where: { id: otp.id }, data: { usedAt: new Date() } });
+    // 条件更新：并发的两次正确提交只有一次能把它标成已用
+    const used = await prisma.otpCode.updateMany({
+      where: { id: otp.id, usedAt: null, attempts: { lt: OTP_MAX_ATTEMPTS } },
+      data: { usedAt: new Date() },
+    });
+    if (used.count === 0) return reply.code(400).send({ error: '验证码已失效，请重新获取' });
     const issued = await issueTokenForPerson(otp.personId!);
     if (!issued) return reply.code(403).send({ error: '该人员已离职或不可用' });
 
@@ -275,7 +303,7 @@ export default async function selfRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const personId = req.auth!.sub;
       const { categoryId, title, description } = req.body ?? ({} as any);
-      if (!categoryId || !title) return reply.code(400).send({ error: '请选择类别并填写标题' });
+      if (!categoryId || typeof title !== 'string' || !title.trim()) return reply.code(400).send({ error: '请选择类别并填写标题' });
 
       const occ = await prisma.occupancy.findFirst({
         where: { personId, status: { in: LIVE } },
@@ -292,14 +320,15 @@ export default async function selfRoutes(app: FastifyInstance) {
           code: await nextCode('WO', 'workOrder'),
           categoryId: cat.id,
           priority: 'NORMAL',
-          title, description,
+          title: title.trim().slice(0, 100),
+          description: typeof description === 'string' ? description.slice(0, 1000) : null,
           scopeType: 'ROOM', scopeId: occ.bed.roomId,
           reportedById: personId, reporterName: person?.name ?? '员工自助',
           blocksOccupancy: false,
         },
       });
-      // 通知本楼宿管
-      await notify('WORKORDER_ASSIGNED', { roleCode: 'WARDEN' }, {
+      // 通知本楼宿管（只推给管这栋楼的）
+      await notify('WORKORDER_ASSIGNED', { roleCode: 'WARDEN', buildingId: await buildingOfPerson(personId) }, {
         code: wo.code, category: cat.nameZh, location: occ.bed.room.code,
         title: wo.title, sla: cat.slaHours,
       }, { type: 'WORKORDER', id: wo.id, linkPath: '/workorders' });
@@ -341,7 +370,7 @@ export default async function selfRoutes(app: FastifyInstance) {
       const { type, reason } = req.body ?? ({} as any);
       if (!SELF_REQUEST_TYPES.includes(type))
         return reply.code(400).send({ error: '不支持的申请类型', allowed: SELF_REQUEST_TYPES });
-      if (!reason?.trim()) return reply.code(400).send({ error: '请填写申请事由' });
+      if (typeof reason !== 'string' || !reason.trim()) return reply.code(400).send({ error: '请填写申请事由' });
 
       // 同类型待审批的只能有一条，防止重复刷
       const dup = await prisma.request.findFirst({ where: { personId, type, status: 'PENDING' } });
@@ -372,7 +401,7 @@ export default async function selfRoutes(app: FastifyInstance) {
           submittedBy: `${person?.name ?? ''}（自助端）`,
         },
       });
-      await notify('REQUEST_SUBMITTED', { roleCode: 'WARDEN' }, {
+      await notify('REQUEST_SUBMITTED', { roleCode: 'WARDEN', buildingId: await buildingOfPerson(personId) }, {
         code: r.code, name: person?.name ?? '', type, reason: reason.trim(),
       }, { type: 'REQUEST', id: r.id, linkPath: '/requests' });
       return { ok: true, code: r.code, id: r.id };
@@ -585,8 +614,23 @@ export default async function selfRoutes(app: FastifyInstance) {
       });
     }
 
+    // 位置必须真实存在。以前不校验，传个不存在的 id 直接 500
+    const targetRoom = b.targetRoomId
+      ? await prisma.room.findUnique({ where: { id: Number(b.targetRoomId) }, include: { floor: true } })
+      : null;
+    const targetFloor = !targetRoom && b.targetFloorId
+      ? await prisma.floor.findUnique({ where: { id: Number(b.targetFloorId) } })
+      : null;
+    if (b.targetRoomId && !targetRoom) return reply.code(400).send({ error: '投诉的房间不存在' });
+    if (!b.targetRoomId && !targetFloor) return reply.code(400).send({ error: '投诉的楼层不存在' });
+    const targetBuildingId = targetRoom?.floor.buildingId ?? targetFloor?.buildingId ?? null;
+
     const occurredFrom = new Date(b.occurredFrom);
     if (Number.isNaN(occurredFrom.getTime())) return reply.code(400).send({ error: '发生时间格式不对' });
+    const occurredTo = b.occurredTo ? new Date(b.occurredTo) : null;
+    if (occurredTo && (Number.isNaN(occurredTo.getTime()) || occurredTo < occurredFrom)) {
+      return reply.code(400).send({ error: '结束时间不能早于开始时间' });
+    }
     // 未来时间显然是填错了；太久以前的也没法查，直接挡掉省得双方白忙
     const backDays = await getSetting<number>('complaint.maxBacklogDays', 14);
     if (occurredFrom.getTime() > Date.now() + 3600000) {
@@ -607,12 +651,12 @@ export default async function selfRoutes(app: FastifyInstance) {
         typeId: type.id,
         complainantId: personId,
         anonymous,
-        targetRoomId: b.targetRoomId ? Number(b.targetRoomId) : null,
-        targetFloorId: b.targetFloorId ? Number(b.targetFloorId) : null,
-        targetArea: b.targetArea?.slice(0, 100) ?? null,
+        targetRoomId: targetRoom?.id ?? null,
+        targetFloorId: targetRoom ? null : (targetFloor?.id ?? null),
+        targetArea: typeof b.targetArea === 'string' ? b.targetArea.slice(0, 100) : null,
         occurredFrom,
-        occurredTo: b.occurredTo ? new Date(b.occurredTo) : null,
-        description: b.description?.slice(0, 500) ?? null,
+        occurredTo,
+        description: typeof b.description === 'string' && b.description.trim() ? b.description.trim().slice(0, 500) : null,
         lang: person ? localeOf(person) : 'zh',
         status: 'NEW',
       },
@@ -623,7 +667,22 @@ export default async function selfRoutes(app: FastifyInstance) {
 
     // 派给谁由类别决定。投诉宿管本人的走 MANAGER —— 绝不能落到被投诉的宿管手上
     const roleCode = { WARDEN: 'WARDEN', MANAGER: 'DORM_MANAGER', EHS: 'EHS', HR: 'HR' }[type.routeTo] ?? 'WARDEN';
-    await notify('COMPLAINT_SUBMITTED', { roleCode }, {
+    // 多人独立反映同一房间 → 把这一组未办结的都升为 HIGH（按不同投诉人数，不按条数）
+    if (c.targetRoomId) {
+      const related = await findRelated(c);
+      const threshold = await getSetting<number>('complaint.repeatThreshold', 3);
+      if (related.distinctComplainants >= threshold) {
+        await prisma.complaint.updateMany({
+          where: {
+            id: { in: [c.id, ...related.rows.map((r) => r.id)] },
+            status: { in: ['NEW', 'ACCEPTED', 'INVESTIGATING'] },
+            priority: { in: ['LOW', 'NORMAL'] },
+          },
+          data: { priority: 'HIGH' },
+        });
+      }
+    }
+    await notify('COMPLAINT_SUBMITTED', { roleCode, buildingId: targetBuildingId }, {
       code: c.code,
       type: type.nameZh,
       location: c.targetRoom?.code ?? c.targetArea ?? '公共区域',
@@ -701,9 +760,10 @@ export default async function selfRoutes(app: FastifyInstance) {
       if (!['NEW', 'ACCEPTED'].includes(c.status)) {
         return reply.code(400).send({ error: '已经在核实中了，撤不了，请直接联系宿管说明' });
       }
-      await prisma.complaint.update({
-        where: { id: c.id }, data: { status: 'WITHDRAWN', resolvedAt: new Date() },
+      const r = await prisma.complaint.updateMany({
+        where: { id: c.id, status: { in: ['NEW', 'ACCEPTED'] } }, data: { status: 'WITHDRAWN', resolvedAt: new Date() },
       });
+      if (r.count === 0) return reply.code(409).send({ error: '状态已变化，请刷新后再试' });
       await logEvent(c.id, 'WITHDRAW', '投诉人', '投诉人主动撤回', true);
       return { ok: true };
     }
@@ -721,12 +781,14 @@ export default async function selfRoutes(app: FastifyInstance) {
       if (!['SUBSTANTIATED', 'UNSUBSTANTIATED', 'CLOSED'].includes(c.status)) {
         return reply.code(400).send({ error: '还没有处理结果，暂时不能评价' });
       }
+      if (c.rating != null) return reply.code(400).send({ error: '已经评价过了' });
       const rating = Math.max(1, Math.min(5, Number(req.body?.rating ?? 5)));
       await prisma.complaint.update({
         where: { id: c.id },
         data: { rating, ratingComment: req.body?.comment?.slice(0, 200) ?? null },
       });
-      await logEvent(c.id, 'RATE', '投诉人', `评价 ${rating} 分${req.body?.comment ? '：' + req.body.comment : ''}`, false);
+      const comment = typeof req.body?.comment === 'string' ? req.body.comment.slice(0, 200) : '';
+      await logEvent(c.id, 'RATE', '投诉人', `评价 ${rating} 分${comment ? '：' + comment : ''}`, false);
       return { ok: true };
     }
   );
@@ -743,4 +805,10 @@ export default async function selfRoutes(app: FastifyInstance) {
       requestTypes,
     };
   });
+}
+
+/** 手机号打码。先去掉空格和横杠 —— 「+62 817-5026-2431」这种格式按连续数字匹配会整串原样漏出去 */
+function maskPhone(phone: string) {
+  const d = phone.replace(/\D/g, '');
+  return d.length >= 7 ? `${d.slice(0, 2)}****${d.slice(-4)}` : '****';
 }

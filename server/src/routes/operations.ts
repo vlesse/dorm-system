@@ -1,7 +1,22 @@
 import type { FastifyInstance } from 'fastify';
-import { prisma } from '../db.js';
+import { prisma, paging } from '../db.js';
 import { nextCode } from '../services/space.js';
-import { requirePerm, actor, audit } from '../services/auth.js';
+import {
+  requirePerm, actor, audit, buildingScope, polyScopeWhere, personScopeWhere, roomInScope,
+} from '../services/auth.js';
+
+const roomScopeWhere = (scope: number[] | null) =>
+  scope ? { floor: { buildingId: { in: scope } } } : undefined;
+
+/** 工单挂在哪栋楼 —— 通知只推给这栋楼的宿管 */
+async function buildingOfScope(scopeType: string, scopeId: number) {
+  if (scopeType === 'BUILDING') return scopeId;
+  if (scopeType === 'FLOOR') return (await prisma.floor.findUnique({ where: { id: scopeId } }))?.buildingId ?? null;
+  if (scopeType === 'ROOM') {
+    return (await prisma.room.findUnique({ where: { id: scopeId }, include: { floor: true } }))?.floor.buildingId ?? null;
+  }
+  return null;
+}
 import { notify } from '../services/notify.js';
 
 /**
@@ -31,9 +46,8 @@ const scopeLabel = async (scopeType: string, scopeId: number) => {
 export default async function operationRoutes(app: FastifyInstance) {
   // ==================================================== 报修工单
   app.get<{ Querystring: Record<string, string | undefined> }>('/api/workorders', async (req) => {
-    const page = Number(req.query.page ?? 1);
-    const pageSize = Math.min(Number(req.query.pageSize ?? 20), 200);
-    const where: any = {};
+    const { page, pageSize } = paging(req.query, 20);
+    const where: any = { AND: [await polyScopeWhere(buildingScope(req))] };
     if (req.query.status) where.status = req.query.status;
     if (req.query.priority) where.priority = req.query.priority;
     if (req.query.categoryId) where.categoryId = Number(req.query.categoryId);
@@ -70,16 +84,23 @@ export default async function operationRoutes(app: FastifyInstance) {
 
   app.post<{ Body: Record<string, any> }>('/api/workorders',
     { preHandler: requirePerm('workorder:write') },
-    async (req) => {
-    const b = req.body;
+    async (req, reply) => {
+    const b = req.body ?? {};
     const cat = await prisma.workOrderCategory.findUnique({ where: { id: Number(b.categoryId) } });
+    if (!cat) return reply.code(400).send({ error: '报修类别不存在' });
+    if (!b.title) return reply.code(400).send({ error: '请填写标题' });
+    const scopeType = b.scopeType ?? 'ROOM';
+    const scopeId = Number(b.scopeId);
+    const bld = await buildingOfScope(scopeType, scopeId);
+    const scope = buildingScope(req);
+    if (bld == null || (scope && !scope.includes(bld))) return reply.code(400).send({ error: '报修位置不存在或不在你的管辖范围内' });
     const wo = await prisma.workOrder.create({
       data: {
         code: await nextCode('WO', 'workOrder'),
         categoryId: Number(b.categoryId),
         priority: b.priority ?? 'NORMAL',
         title: b.title, description: b.description,
-        scopeType: b.scopeType ?? 'ROOM', scopeId: Number(b.scopeId),
+        scopeType, scopeId,
         reportedById: b.reportedById ? Number(b.reportedById) : null,
         reporterName: b.reporterName ?? '宿管代报',
         blocksOccupancy: b.blocksOccupancy ?? cat?.blocksByDefault ?? false,
@@ -87,7 +108,7 @@ export default async function operationRoutes(app: FastifyInstance) {
     });
     // 紧急或影响住宿的工单，直接推给宿管，不等他们自己刷新页面
     if (wo.priority === 'URGENT' || wo.blocksOccupancy) {
-      await notify('WORKORDER_ASSIGNED', { roleCode: 'WARDEN' }, {
+      await notify('WORKORDER_ASSIGNED', { roleCode: 'WARDEN', buildingId: bld }, {
         code: wo.code, category: cat?.nameZh ?? '', location: await scopeLabel(wo.scopeType, wo.scopeId),
         title: wo.title, sla: cat?.slaHours ?? 48,
       }, { type: 'WORKORDER', id: wo.id, linkPath: '/workorders' });
@@ -101,22 +122,26 @@ export default async function operationRoutes(app: FastifyInstance) {
 
   app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/workorders/:id',
     { preHandler: requirePerm('workorder:write') },
-    async (req) => {
+    async (req, reply) => {
     const id = Number(req.params.id);
-    const b = req.body;
+    const b = req.body ?? {};
+    const before = await prisma.workOrder.findFirst({ where: { AND: [{ id }, await polyScopeWhere(buildingScope(req))] } });
+    if (!before) return reply.code(404).send({ error: '工单不存在或不在你的管辖范围内' });
     const data: any = {};
-    for (const k of ['priority', 'title', 'description', 'assignedTo', 'cost', 'materials', 'rating', 'note', 'blocksOccupancy']) {
+    for (const k of ['priority', 'title', 'description', 'assignedTo', 'cost', 'materials', 'note', 'blocksOccupancy']) {
       if (k in b) data[k] = b[k];
     }
     if (b.status) {
+      if (!['NEW', 'ASSIGNED', 'IN_PROGRESS', 'DONE', 'CLOSED', 'REJECTED'].includes(b.status))
+        return reply.code(400).send({ error: `未知状态 ${b.status}` });
       data.status = b.status;
       if (b.status === 'IN_PROGRESS') data.startedAt = new Date();
       if (b.status === 'DONE') data.finishedAt = new Date();
       if (b.status === 'CLOSED') { data.closedAt = new Date(); data.finishedAt = data.finishedAt ?? new Date(); }
     }
     const wo = await prisma.workOrder.update({ where: { id }, data, include: { category: true } });
-    // 完成时告诉报修人一声 —— 不然他不知道修好了没
-    if (wo.status === 'DONE' && wo.reportedById) {
+    // 完成时告诉报修人一声 —— 只在「变成」完成的那一次发，改备注不重复通知
+    if (wo.status === 'DONE' && before.status !== 'DONE' && wo.reportedById) {
       await notify('WORKORDER_DONE', { personId: wo.reportedById },
         { code: wo.code, title: wo.title },
         { type: 'WORKORDER', id: wo.id, linkPath: '/workorders' });
@@ -135,14 +160,18 @@ export default async function operationRoutes(app: FastifyInstance) {
 
   // ==================================================== 违规记录
   app.get<{ Querystring: Record<string, string | undefined> }>('/api/violations', async (req) => {
-    const page = Number(req.query.page ?? 1);
-    const pageSize = Math.min(Number(req.query.pageSize ?? 20), 200);
-    const where: any = {};
+    const { page, pageSize } = paging(req.query, 20);
+    const scope = buildingScope(req);
+    // 房间在范围内；没挂房间的按人算（人住在范围内）
+    const where: any = scope
+      ? { AND: [{ OR: [{ room: roomScopeWhere(scope) }, { roomId: null, person: personScopeWhere(scope) }] }] }
+      : {};
     if (req.query.status) where.status = req.query.status;
     if (req.query.typeId) where.typeId = Number(req.query.typeId);
     if (req.query.severity) where.type = { severity: req.query.severity };
     if (req.query.personId) where.personId = Number(req.query.personId);
     if (req.query.buildingId) where.room = { floor: { buildingId: Number(req.query.buildingId) } };
+    if (req.query.q) where.OR = [{ code: { contains: req.query.q } }, { person: { name: { contains: req.query.q } } }];
 
     const [total, rows] = await Promise.all([
       prisma.violation.count({ where }),
@@ -175,9 +204,11 @@ export default async function operationRoutes(app: FastifyInstance) {
     };
   });
 
-  app.post<{ Body: Record<string, any> }>('/api/violations', { preHandler: requirePerm('violation:create') }, async (req) => {
-    const b = req.body;
+  app.post<{ Body: Record<string, any> }>('/api/violations', { preHandler: requirePerm('violation:create') }, async (req, reply) => {
+    const b = req.body ?? {};
     const t = await prisma.violationType.findUnique({ where: { id: Number(b.typeId) } });
+    if (!t) return reply.code(400).send({ error: '违规类型不存在' });
+    if (b.roomId && !(await roomInScope(req, Number(b.roomId)))) return reply.code(400).send({ error: '房间不在你的管辖范围内' });
     const created = await prisma.violation.create({
       data: {
         code: await nextCode('VIO', 'violation'),
@@ -205,16 +236,23 @@ export default async function operationRoutes(app: FastifyInstance) {
   app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/violations/:id',
     { preHandler: requirePerm('violation:write') },
     async (req) => {
-    const data: any = { ...req.body };
-    if (data.status === 'HANDLED' && !data.handledAt) data.handledAt = new Date();
-    return prisma.violation.update({ where: { id: Number(req.params.id) }, data });
+    const data: any = {};
+    for (const k of ['status', 'action', 'points', 'fine', 'description', 'evidence', 'note']) if (k in (req.body ?? {})) data[k] = req.body[k];
+    if (data.status === 'HANDLED') data.handledAt = new Date();
+    const v = await prisma.violation.update({ where: { id: Number(req.params.id) }, data });
+    await audit(req, 'VIOLATION_UPDATE', { targetType: 'Violation', targetId: v.id, detail: JSON.stringify(data).slice(0, 200) });
+    return v;
   });
 
   /** 违规积分排行 —— 超过阈值要处理 */
-  app.get('/api/violations/ranking', async () => {
+  app.get('/api/violations/ranking', async (req) => {
+    const scope = buildingScope(req);
     const rows = await prisma.violation.groupBy({
       by: ['personId'],
-      where: { status: { not: 'CLOSED' }, personId: { not: null } },
+      where: {
+        status: { not: 'CLOSED' }, personId: { not: null },
+        ...(scope ? { person: { occupancies: { some: { status: { in: ['ACTIVE', 'HELD', 'RESERVED'] }, bed: { room: roomScopeWhere(scope) } } } } } : {}),
+      },
       _sum: { points: true, fine: true },
       _count: true,
     });
@@ -240,7 +278,10 @@ export default async function operationRoutes(app: FastifyInstance) {
 
   // ==================================================== 访客
   app.get<{ Querystring: Record<string, string | undefined> }>('/api/visitors', async (req) => {
-    const where: any = {};
+    const scope = buildingScope(req);
+    const where: any = scope
+      ? { AND: [{ OR: [{ room: roomScopeWhere(scope) }, { roomId: null, hostPerson: personScopeWhere(scope) }] }] }
+      : {};
     if (req.query.status) where.status = req.query.status;
     if (req.query.overnight === 'true') where.overnight = true;
     if (req.query.q) where.OR = [{ name: { contains: req.query.q } }, { code: { contains: req.query.q } }];
@@ -266,8 +307,10 @@ export default async function operationRoutes(app: FastifyInstance) {
 
   app.post<{ Body: Record<string, any> }>('/api/visitors',
     { preHandler: requirePerm('visitor:write') },
-    async (req) => {
-    const b = req.body;
+    async (req, reply) => {
+    const b = req.body ?? {};
+    if (!b.name || !b.hostPersonId) return reply.code(400).send({ error: '请填写访客姓名和被访人' });
+    if (b.roomId && !(await roomInScope(req, Number(b.roomId)))) return reply.code(400).send({ error: '房间不在你的管辖范围内' });
     return prisma.visitor.create({
       data: {
         code: await nextCode('V', 'visitor'),
@@ -277,7 +320,7 @@ export default async function operationRoutes(app: FastifyInstance) {
         expectedOutAt: b.expectedOutAt ? new Date(b.expectedOutAt) : null,
         // 留宿必须审批；不留宿的直接放行
         status: b.overnight ? 'PENDING' : 'IN',
-        registeredBy: b.registeredBy ?? '门岗',
+        registeredBy: b.registeredBy ?? actor(req),
         note: b.note,
       },
     });
@@ -285,16 +328,21 @@ export default async function operationRoutes(app: FastifyInstance) {
 
   app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/visitors/:id',
     { preHandler: requirePerm('visitor:write') },
-    async (req) => {
-    const data: any = { ...req.body };
-    if (data.status === 'OUT' && !data.checkOutAt) data.checkOutAt = new Date();
+    async (req, reply) => {
+    const b = req.body ?? {};
+    const data: any = {};
+    for (const k of ['status', 'expectedOutAt', 'approvedBy', 'note', 'purpose']) if (k in b) data[k] = b[k];
+    if (data.status && !['PENDING', 'APPROVED', 'IN', 'OUT', 'REJECTED'].includes(data.status))
+      return reply.code(400).send({ error: `未知状态 ${data.status}` });
+    if (data.status === 'OUT') data.checkOutAt = new Date();
+    if (data.status === 'APPROVED') data.approvedBy = actor(req);
     if (data.expectedOutAt) data.expectedOutAt = new Date(data.expectedOutAt);
     return prisma.visitor.update({ where: { id: Number(req.params.id) }, data });
   });
 
   // ==================================================== 查寝 / 检查
   app.get<{ Querystring: Record<string, string | undefined> }>('/api/inspections', async (req) => {
-    const where: any = {};
+    const where: any = { AND: [await polyScopeWhere(buildingScope(req))] };
     if (req.query.type) where.type = req.query.type;
     if (req.query.status) where.status = req.query.status;
     const rows = await prisma.inspection.findMany({
@@ -319,8 +367,8 @@ export default async function operationRoutes(app: FastifyInstance) {
   });
 
   app.get<{ Params: { id: string } }>('/api/inspections/:id', async (req, reply) => {
-    const ins = await prisma.inspection.findUnique({
-      where: { id: Number(req.params.id) },
+    const ins = await prisma.inspection.findFirst({
+      where: { AND: [{ id: Number(req.params.id) }, await polyScopeWhere(buildingScope(req))] },
       include: {
         items: {
           include: {
@@ -347,12 +395,17 @@ export default async function operationRoutes(app: FastifyInstance) {
   app.post<{ Body: { type: string; scopeType: string; scopeId: number; inspector?: string; plannedAt?: string } }>(
     '/api/inspections',
     { preHandler: requirePerm('inspection:write') },
-    async (req) => {
-      const { type, scopeType, scopeId, inspector, plannedAt } = req.body;
+    async (req, reply) => {
+      const { type, scopeType, inspector, plannedAt } = req.body ?? ({} as any);
+      const scopeId = Number(req.body?.scopeId);
+      if (!['FLOOR', 'BUILDING'].includes(scopeType)) return reply.code(400).send({ error: '查寝范围只能是楼层或楼栋' });
+      const bld = await buildingOfScope(scopeType, scopeId);
+      const scope = buildingScope(req);
+      if (bld == null || (scope && !scope.includes(bld))) return reply.code(400).send({ error: '范围不存在或不在你的管辖范围内' });
       const ins = await prisma.inspection.create({
         data: {
           code: await nextCode('INS', 'inspection'),
-          type, scopeType, scopeId, inspector: inspector ?? 'admin',
+          type, scopeType, scopeId, inspector: inspector ?? actor(req),
           plannedAt: plannedAt ? new Date(plannedAt) : new Date(),
           status: 'DOING',
         },
@@ -383,21 +436,26 @@ export default async function operationRoutes(app: FastifyInstance) {
 
   app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/inspection-items/:id',
     { preHandler: requirePerm('inspection:write') },
-    async (req) =>
-    prisma.inspectionItem.update({ where: { id: Number(req.params.id) }, data: req.body })
+    async (req) => {
+      const data: any = {};
+      for (const k of ['present', 'score', 'issues', 'photo']) if (k in (req.body ?? {})) data[k] = req.body[k];
+      return prisma.inspectionItem.update({ where: { id: Number(req.params.id) }, data });
+    }
   );
 
   app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/inspections/:id',
     { preHandler: requirePerm('inspection:write') },
     async (req) => {
-    const data: any = { ...req.body };
-    if (data.status === 'DONE' && !data.executedAt) data.executedAt = new Date();
+    const data: any = {};
+    for (const k of ['status', 'score', 'summary', 'inspector']) if (k in (req.body ?? {})) data[k] = req.body[k];
+    if (data.status === 'DONE') data.executedAt = new Date();
     return prisma.inspection.update({ where: { id: Number(req.params.id) }, data });
   });
 
   // ==================================================== 物品 / 押金
   app.get<{ Querystring: Record<string, string | undefined> }>('/api/issued-items', async (req) => {
-    const where: any = {};
+    const scope = buildingScope(req);
+    const where: any = scope ? { person: personScopeWhere(scope) } : {};
     if (req.query.personId) where.personId = Number(req.query.personId);
     if (req.query.pending === 'true') where.returnedAt = null;
     const rows = await prisma.issuedItem.findMany({
@@ -415,29 +473,43 @@ export default async function operationRoutes(app: FastifyInstance) {
   app.post<{ Body: { personId: number; itemTypeId: number; quantity?: number; bedId?: number; occupancyId?: number; issuedBy?: string } }>(
     '/api/issued-items',
     { preHandler: requirePerm('item:write') },
-    async (req) => prisma.issuedItem.create({ data: { ...req.body, quantity: req.body.quantity ?? 1 } })
+    async (req, reply) => {
+      const b = req.body ?? ({} as any);
+      if (!b.personId || !b.itemTypeId) return reply.code(400).send({ error: '请选择人员和物品' });
+      return prisma.issuedItem.create({
+        data: {
+          personId: Number(b.personId), itemTypeId: Number(b.itemTypeId),
+          quantity: Math.max(1, Number(b.quantity) || 1),
+          bedId: b.bedId ? Number(b.bedId) : null, occupancyId: b.occupancyId ? Number(b.occupancyId) : null,
+          issuedBy: b.issuedBy ?? actor(req),
+        },
+      });
+    }
   );
 
   /** 归还 / 报损。损坏或遗失自动按单价算赔偿 */
   app.put<{ Params: { id: string }; Body: { condition?: string; compensation?: number; returnedBy?: string } }>(
     '/api/issued-items/:id/return',
     { preHandler: requirePerm('item:write') },
-    async (req) => {
+    async (req, reply) => {
       const id = Number(req.params.id);
       const item = await prisma.issuedItem.findUnique({ where: { id }, include: { itemType: true } });
-      const cond = req.body.condition ?? 'GOOD';
-      const comp = req.body.compensation ??
+      if (!item) return reply.code(404).send({ error: '发放记录不存在' });
+      if (item.returnedAt) return reply.code(400).send({ error: '这件物品已经归还过了' });
+      const cond = req.body?.condition ?? 'GOOD';
+      const comp = req.body?.compensation ??
         (cond === 'LOST' ? (item?.itemType.price ?? 0) * (item?.quantity ?? 1)
           : cond === 'DAMAGED' ? Math.round((item?.itemType.price ?? 0) * 0.5) : 0);
       return prisma.issuedItem.update({
         where: { id },
-        data: { returnedAt: new Date(), returnedBy: req.body.returnedBy ?? 'admin', condition: cond, compensation: comp },
+        data: { returnedAt: new Date(), returnedBy: req.body?.returnedBy ?? actor(req), condition: cond, compensation: comp },
       });
     }
   );
 
   app.get<{ Querystring: { personId?: string } }>('/api/deposits', async (req) => {
-    const where: any = {};
+    const scope = buildingScope(req);
+    const where: any = scope ? { person: personScopeWhere(scope) } : {};
     if (req.query.personId) where.personId = Number(req.query.personId);
     return prisma.deposit.findMany({
       where, include: { person: { select: { id: true, name: true, employeeNo: true } } },
@@ -447,7 +519,8 @@ export default async function operationRoutes(app: FastifyInstance) {
 
   // ==================================================== 申请审批
   app.get<{ Querystring: Record<string, string | undefined> }>('/api/requests', async (req) => {
-    const where: any = {};
+    const scope = buildingScope(req);
+    const where: any = scope ? { person: personScopeWhere(scope) } : {};
     if (req.query.status) where.status = req.query.status;
     if (req.query.type) where.type = req.query.type;
     const rows = await prisma.request.findMany({
@@ -479,15 +552,18 @@ export default async function operationRoutes(app: FastifyInstance) {
 
   app.post<{ Body: Record<string, any> }>('/api/requests',
     { preHandler: requirePerm('request:read') },
-    async (req) => {
-    const b = req.body;
+    async (req, reply) => {
+    const b = req.body ?? {};
+    if (!['CHECKIN', 'TRANSFER', 'CHECKOUT', 'COUPLE_ROOM', 'VISITOR_OVERNIGHT', 'EXTRA_BED'].includes(b.type))
+      return reply.code(400).send({ error: '不支持的申请类型' });
+    if (!b.personId || !b.reason) return reply.code(400).send({ error: '请选择人员并填写事由' });
     return prisma.request.create({
       data: {
         code: await nextCode('REQ', 'request'),
         type: b.type, personId: Number(b.personId),
         targetRoomId: b.targetRoomId ? Number(b.targetRoomId) : null,
         targetBedId: b.targetBedId ? Number(b.targetBedId) : null,
-        reason: b.reason, submittedBy: b.submittedBy ?? 'admin',
+        reason: b.reason, submittedBy: b.submittedBy ?? actor(req),
       },
     });
   });
@@ -495,16 +571,21 @@ export default async function operationRoutes(app: FastifyInstance) {
   app.put<{ Params: { id: string }; Body: { status: string; comment?: string; approvedBy?: string } }>(
     '/api/requests/:id',
     { preHandler: requirePerm('request:write') },
-    async (req) => {
-      const updated = await prisma.request.update({
-        where: { id: Number(req.params.id) },
+    async (req, reply) => {
+      const status = req.body?.status;
+      if (!['APPROVED', 'REJECTED', 'DONE'].includes(status)) return reply.code(400).send({ error: '请给出审批结论' });
+      // 只有待审批的才能批 / 驳；已批准的才能标记办结。员工已撤销的申请不能再被「批准」
+      const from = status === 'DONE' ? ['APPROVED'] : ['PENDING'];
+      const r = await prisma.request.updateMany({
+        where: { id: Number(req.params.id), status: { in: from } },
         data: {
-          status: req.body.status,
+          status,
           comment: req.body.comment,
-          approvedBy: req.body.approvedBy ?? actor(req),
-          approvedAt: new Date(),
+          ...(status === 'DONE' ? {} : { approvedBy: actor(req), approvedAt: new Date() }),
         },
       });
+      if (r.count === 0) return reply.code(409).send({ error: '申请状态已变化（可能已被撤销或处理），请刷新' });
+      const updated = await prisma.request.findUniqueOrThrow({ where: { id: Number(req.params.id) } });
       const TYPE_ZH: Record<string, string> = {
         CHECKIN: '入住申请', TRANSFER: '调宿申请', CHECKOUT: '退宿申请',
         COUPLE_ROOM: '夫妻房申请', VISITOR_OVERNIGHT: '访客留宿', EXTRA_BED: '加床申请',
@@ -533,16 +614,21 @@ export default async function operationRoutes(app: FastifyInstance) {
   app.post<{ Body: Record<string, any> }>('/api/announcements',
     { preHandler: requirePerm('config:write') },
     async (req) => {
-    const b = { ...req.body };
-    if (b.expiresAt) b.expiresAt = new Date(b.expiresAt);
-    return prisma.announcement.create({ data: { ...b, publishedBy: b.publishedBy ?? 'admin' } as any });
+    const b = pickAnnouncement(req.body);
+    return prisma.announcement.create({ data: { ...b, publishedBy: actor(req) } as any });
   });
 
   app.put<{ Params: { id: string }; Body: Record<string, any> }>('/api/announcements/:id',
     { preHandler: requirePerm('config:write') },
     async (req) => {
-    const b = { ...req.body };
-    if (b.expiresAt) b.expiresAt = new Date(b.expiresAt);
-    return prisma.announcement.update({ where: { id: Number(req.params.id) }, data: b });
+    return prisma.announcement.update({ where: { id: Number(req.params.id) }, data: pickAnnouncement(req.body) });
   });
+}
+
+function pickAnnouncement(body: any) {
+  const b: any = {};
+  for (const k of ['title', 'content', 'titleEn', 'titleId', 'contentEn', 'contentId', 'level',
+    'scopeType', 'scopeId', 'isActive', 'expiresAt']) if (body && k in body) b[k] = body[k];
+  if (b.expiresAt) b.expiresAt = new Date(b.expiresAt);
+  return b;
 }
